@@ -20,6 +20,11 @@ if str(_CURRENT_DIR) not in sys.path:
 
 
 def _dispatch_step(step_type: str, step_input: dict[str, Any]) -> dict[str, Any]:
+    if str(step_type or "").strip() == "worker_runtime_probe":
+        from runtime_probe import build_worker_runtime_probe
+
+        return build_worker_runtime_probe(step_input)
+
     from new_protocol_register.easyprotocol_flow import dispatch_easyprotocol_step
 
     return dispatch_easyprotocol_step(step_type=step_type, step_input=step_input)

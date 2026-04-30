@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,7 @@ if __package__ in (None, ""):
     from others.bootstrap import ensure_local_bundle_imports
 
     ensure_local_bundle_imports()
+    from runtime_probe import build_worker_runtime_probe
     from magic import (
         _should_retry_team_default_invite_via_codex,
         run_cleanup_codex_capacity_once,
@@ -40,6 +40,7 @@ else:
     from .others.bootstrap import ensure_local_bundle_imports
 
     ensure_local_bundle_imports()
+    from runtime_probe import build_worker_runtime_probe
     from .magic import (
         _should_retry_team_default_invite_via_codex,
         run_cleanup_codex_capacity_once,
@@ -90,19 +91,6 @@ def _extract_invite_id(payload: Any) -> str:
                 if value:
                     return value
     return ""
-
-
-def _build_worker_runtime_probe(step_input: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "ok": True,
-        "status": "completed",
-        "workerId": str(os.getenv("PYTHON_PROTOCOL_WORKER_ID") or "").strip(),
-        "workerLaunchedAt": str(os.getenv("PYTHON_PROTOCOL_WORKER_LAUNCHED_AT") or "").strip(),
-        "pid": os.getpid(),
-        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "echo": dict(step_input or {}),
-    }
-
 
 def _write_team_flow_update(*, source_path: Path, updater: Any) -> dict[str, Any]:
     payload = load_json_payload(source_path)
@@ -417,7 +405,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
     normalized_step_type = str(step_type or "").strip()
 
     if normalized_step_type == "worker_runtime_probe":
-        return _build_worker_runtime_probe(step_input)
+        return build_worker_runtime_probe(step_input)
 
     if normalized_step_type == "upload_file_to_r2":
         return upload_file_to_r2(step_input=step_input)
