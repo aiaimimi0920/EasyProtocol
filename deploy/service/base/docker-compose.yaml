@@ -10,6 +10,8 @@ services:
       - "${EASY_PROTOCOL_SERVICE_HOST_PORT:-19788}:9788"
     environment:
       EASY_PROTOCOL_CONFIG_PATH: /etc/easy-protocol/config.yaml
+      EASY_PROTOCOL_RUNTIME_ENV_PATH: /etc/easy-protocol/runtime.env
+      EASY_PROTOCOL_BOOTSTRAP_PATH: /etc/easy-protocol/bootstrap/r2-bootstrap.json
       EASY_PROTOCOL_STATE_DIR: /var/lib/easy-protocol
       EASY_PROTOCOL_RESET_STORE_ON_BOOT: "${EASY_PROTOCOL_RESET_STORE_ON_BOOT:-false}"
     volumes:

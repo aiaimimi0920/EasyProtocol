@@ -38,6 +38,8 @@ Active task:
 - provider-image workflows are now in place
 - Python provider now uses a dynamic subprocess pool behind one manager endpoint
 - isolated new-instance deployment is now available without touching old containers
+- service-base GHCR publish now uploads rendered runtime config to R2
+- service-base GHCR publish now emits an encrypted owner-only import code
 - review whether a remote deploy workflow is needed after target selection
 
 ## Next Steps

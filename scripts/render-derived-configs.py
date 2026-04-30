@@ -122,6 +122,18 @@ def build_service_base_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def build_service_base_env(root_config: dict[str, Any]) -> dict[str, str]:
+    stack = get_dict(get_dict(root_config, "stack"), "easyProtocol")
+    stack_runtime = get_dict(stack, "easyProtocol")
+    return {
+        "EASY_PROTOCOL_CONFIG_PATH": "/etc/easy-protocol/config.yaml",
+        "EASY_PROTOCOL_RUNTIME_ENV_PATH": "/etc/easy-protocol/runtime.env",
+        "EASY_PROTOCOL_BOOTSTRAP_PATH": "/etc/easy-protocol/bootstrap/r2-bootstrap.json",
+        "EASY_PROTOCOL_STATE_DIR": "/var/lib/easy-protocol",
+        "EASY_PROTOCOL_RESET_STORE_ON_BOOT": normalize_bool(stack_runtime.get("resetStoreOnBoot", False)),
+    }
+
+
 def build_easy_stack_env(root_config: dict[str, Any]) -> dict[str, str]:
     providers = get_dict(root_config, "providers")
     python_provider = get_dict(providers, "python")
@@ -167,6 +179,7 @@ def main() -> None:
     )
     parser.add_argument("--root-config", default=str(REPO_ROOT / "config.yaml"))
     parser.add_argument("--service-output", default="")
+    parser.add_argument("--service-env-output", default="")
     parser.add_argument("--stack-config-output", default="")
     parser.add_argument("--stack-env-output", default="")
     args = parser.parse_args()
@@ -180,6 +193,8 @@ def main() -> None:
 
     if args.service_output:
         dump_yaml(Path(args.service_output).resolve(), rendered_runtime)
+    if args.service_env_output:
+        write_env_file(Path(args.service_env_output).resolve(), build_service_base_env(root_config))
 
     if args.stack_config_output:
         dump_yaml(Path(args.stack_config_output).resolve(), rendered_runtime)

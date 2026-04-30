@@ -14,19 +14,24 @@ FROM debian:bookworm-slim AS runtime
 WORKDIR /app
 
 ENV EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml \
+    EASY_PROTOCOL_RUNTIME_ENV_PATH=/etc/easy-protocol/runtime.env \
     EASY_PROTOCOL_STATE_DIR=/var/lib/easy-protocol
 
 COPY --from=builder /out/easy_protocol /usr/local/bin/easy_protocol
 COPY deploy/service/base/config.template.yaml /opt/easy-protocol/config.template.yaml
 COPY deploy/service/base/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/service/base/bootstrap-service-config.py /usr/local/bin/bootstrap-service-config.py
+COPY scripts/easyprotocol-import-code.py /usr/local/bin/easyprotocol-import-code.py
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates gosu \
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends ca-certificates gosu python3 python3-pip \
+    && python3 -m pip install --no-cache-dir --break-system-packages boto3 pynacl \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 easy \
     && sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/easy_protocol \
-    && mkdir -p /etc/easy-protocol /var/lib/easy-protocol \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/easy_protocol /usr/local/bin/bootstrap-service-config.py /usr/local/bin/easyprotocol-import-code.py \
+    && mkdir -p /etc/easy-protocol /var/lib/easy-protocol /var/lib/easy-protocol/state \
     && chown -R easy:easy /etc/easy-protocol /var/lib/easy-protocol /opt/easy-protocol
 
 EXPOSE 9788

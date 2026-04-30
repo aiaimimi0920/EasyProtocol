@@ -86,12 +86,29 @@ Current bootstrap entrypoints:
 - `scripts/deploy-easyprotocol-stack.ps1`
 - `scripts/deploy-easyprotocol-release.ps1`
 - `scripts/deploy-isolated-easyprotocol-instance.ps1`
+- `scripts/upload-service-base-r2-config.ps1`
+- `scripts/write-service-base-r2-bootstrap.ps1`
+- `scripts/decrypt-import-code.ps1`
 - `scripts/publish-provider-images.ps1`
 - `scripts/deploy-subproject.ps1`
 - `scripts/sync-from-protocolservice.ps1`
 - `scripts/verify-structural-import.ps1`
 
 See `docs/configuration.md` for the current root-config contract.
+
+## Hosted Publish Direction
+
+The service-base publish workflow now follows the same operator pattern used by
+EasyEmail:
+
+- GitHub repository secrets are materialized into a temporary root `config.yaml`
+- the gateway image is built and pushed to GHCR
+- the rendered runtime config is uploaded to private Cloudflare R2
+- an owner-only encrypted import-code artifact is generated for bootstrap
+
+See `docs/github-actions-secrets.md` and
+`docs/easyprotocol-release-workflow.md` for the exact secret names and the
+import-code flow.
 
 ## Migration Rule
 

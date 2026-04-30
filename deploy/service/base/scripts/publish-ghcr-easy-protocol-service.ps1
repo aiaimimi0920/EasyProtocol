@@ -10,7 +10,7 @@ $workspaceRoot = Resolve-Path (Join-Path $PSScriptRoot "..\\..\\..")
 $image = "ghcr.io/$Owner/easy-protocol-service:$ReleaseTag"
 
 Write-Host "[easy-protocol] building $image from $workspaceRoot"
-docker build -t $image -f (Join-Path $workspaceRoot "deploy\\EasyProtocol\\Dockerfile") $workspaceRoot
+docker build -t $image -f (Join-Path $workspaceRoot "deploy\\service\\base\\Dockerfile") $workspaceRoot
 
 if ($Push) {
   Write-Host "[easy-protocol] pushing $image"

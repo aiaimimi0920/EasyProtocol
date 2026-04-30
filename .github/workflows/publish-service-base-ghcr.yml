@@ -35,7 +35,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     env:
-      REGISTRY: ghcr.io
+      REGISTRY: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_REGISTRY != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_REGISTRY || 'ghcr.io' }}
       IMAGE_NAME: easy-protocol-service
 
     steps:
@@ -49,7 +49,7 @@ jobs:
 
       - name: Install Python Dependencies
         shell: bash
-        run: python -m pip install --disable-pip-version-check pyyaml
+        run: python -m pip install --disable-pip-version-check pyyaml boto3 pynacl
 
       - name: Prepare Operator Config
         env:
@@ -85,6 +85,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           version="${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}"
           if [[ -z "${version}" ]]; then
             if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
@@ -93,23 +94,31 @@ jobs:
               version="release-$(date -u +%Y%m%d)-$(printf '%03d' "${GITHUB_RUN_NUMBER}")"
             fi
           fi
+
           short_sha="$(git rev-parse --short=12 HEAD)"
           owner="${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_OWNER != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_OWNER || github.repository_owner }}"
+          owner="$(echo "${owner}" | tr '[:upper:]' '[:lower:]')"
           image_ref="${REGISTRY}/${owner}/${IMAGE_NAME}"
           smoke_image="easyprotocol-smoke:${short_sha}"
-          tags="${image_ref}:${version},${image_ref}:sha-${short_sha}"
+          platform="${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'linux/amd64' }}"
+          run_smoke="${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}"
           push_latest="${{ github.event_name == 'workflow_dispatch' && inputs.push_latest || false }}"
-          if [[ "${push_latest}" == "true" || "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            tags="${tags},${image_ref}:latest"
-          fi
+
           {
             echo "version=${version}"
             echo "short_sha=${short_sha}"
             echo "image_ref=${image_ref}"
             echo "smoke_image=${smoke_image}"
-            echo "tags=${tags}"
-            echo "platform=${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'linux/amd64' }}"
-            echo "run_smoke=${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}"
+            echo "platform=${platform}"
+            echo "run_smoke=${run_smoke}"
+            echo "push_latest=${push_latest}"
+            echo "tags<<EOF"
+            echo "${image_ref}:${version}"
+            echo "${image_ref}:sha-${short_sha}"
+            if [[ "${push_latest}" == "true" || "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "${image_ref}:latest"
+            fi
+            echo "EOF"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Validate Release Tag
@@ -143,7 +152,7 @@ jobs:
       - name: Log In To GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME || github.actor }}
           password: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -161,12 +170,133 @@ jobs:
           cache-from: type=gha,scope=service-base-ghcr
           cache-to: type=gha,mode=max,scope=service-base-ghcr
 
+      - name: Upload Service Base Runtime Config To R2
+        id: runtime_config_upload
+        env:
+          EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID }}
+          EASYPROTOCOL_R2_CONFIG_BUCKET: ${{ secrets.EASYPROTOCOL_R2_CONFIG_BUCKET }}
+          EASYPROTOCOL_R2_CONFIG_ENDPOINT: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENDPOINT }}
+          EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID }}
+          EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY }}
+        shell: pwsh
+        run: |
+          foreach ($name in @(
+            'EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID',
+            'EASYPROTOCOL_R2_CONFIG_BUCKET',
+            'EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY',
+            'EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY',
+            'EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY',
+            'EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID',
+            'EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY'
+          )) {
+            if ([string]::IsNullOrWhiteSpace([string](Get-Item "Env:$name").Value)) {
+              throw "Missing required R2 config secret: $name"
+            }
+          }
+
+          $manifestPath = Join-Path $PWD 'service-base-r2-config-manifest.json'
+          .\scripts\upload-service-base-r2-config.ps1 `
+            -ConfigPath .\config.yaml `
+            -AccountId $env:EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID `
+            -Bucket $env:EASYPROTOCOL_R2_CONFIG_BUCKET `
+            -AccessKeyId $env:EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID `
+            -SecretAccessKey $env:EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY `
+            -ConfigObjectKey $env:EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY `
+            -RuntimeEnvObjectKey $env:EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY `
+            -ManifestObjectKey $env:EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY `
+            -Endpoint $env:EASYPROTOCOL_R2_CONFIG_ENDPOINT `
+            -ReleaseVersion '${{ steps.release_meta.outputs.version }}' `
+            -ManifestOutput $manifestPath
+
+          "path=$manifestPath" >> $env:GITHUB_OUTPUT
+
+      - name: Generate Encrypted Owner Import Code
+        id: import_code
+        env:
+          EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID }}
+          EASYPROTOCOL_R2_CONFIG_BUCKET: ${{ secrets.EASYPROTOCOL_R2_CONFIG_BUCKET }}
+          EASYPROTOCOL_R2_CONFIG_ENDPOINT: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENDPOINT }}
+          EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID }}
+          EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY }}
+          EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY: ${{ secrets.EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in \
+            EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID \
+            EASYPROTOCOL_R2_CONFIG_BUCKET \
+            EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY \
+            EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID \
+            EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY \
+            EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required import-code secret: ${name}" >&2
+              exit 1
+            fi
+          done
+
+          python scripts/easyprotocol-import-code.py encode \
+            --account-id "${EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID}" \
+            --bucket "${EASYPROTOCOL_R2_CONFIG_BUCKET}" \
+            --manifest-object-key "${EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY}" \
+            --access-key-id "${EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID}" \
+            --secret-access-key "${EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY}" \
+            --endpoint "${EASYPROTOCOL_R2_CONFIG_ENDPOINT}" \
+            --sync-enabled \
+            --sync-interval-seconds 7200 \
+            --release-version "${{ steps.release_meta.outputs.version }}" \
+            --json-output \
+            --output service-base-import-code.bundle.json
+
+          python scripts/easyprotocol-import-code.py encrypt \
+            --bundle-file service-base-import-code.bundle.json \
+            --public-key "${EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY}" \
+            --metadata-json "{\"releaseVersion\":\"${{ steps.release_meta.outputs.version }}\",\"imageRef\":\"${{ steps.release_meta.outputs.image_ref }}\",\"manifestObjectKey\":\"${EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY}\"}" \
+            --output service-base-import-code.encrypted.json
+
+          echo "bundle_path=service-base-import-code.bundle.json" >> "${GITHUB_OUTPUT}"
+          echo "encrypted_path=service-base-import-code.encrypted.json" >> "${GITHUB_OUTPUT}"
+
       - name: Write Release Manifest
         id: manifest
         shell: pwsh
         run: |
-          $tags = '${{ steps.release_meta.outputs.tags }}'.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+          $tagsRaw = @'
+          ${{ steps.release_meta.outputs.tags }}
+          '@
+          $tags = @(
+            $tagsRaw -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )
+
+          $distribution = $null
+          if (Test-Path -LiteralPath '${{ steps.runtime_config_upload.outputs.path }}') {
+            $distribution = Get-Content -LiteralPath '${{ steps.runtime_config_upload.outputs.path }}' -Raw | ConvertFrom-Json
+          }
+
           $manifest = [ordered]@{
+            schemaVersion = 1
+            generatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            repository = '${{ github.repository }}'
+            workflow = [ordered]@{
+              name = '${{ github.workflow }}'
+              runId = '${{ github.run_id }}'
+              runNumber = '${{ github.run_number }}'
+              runAttempt = '${{ github.run_attempt }}'
+              url = 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            }
+            source = [ordered]@{
+              eventName = '${{ github.event_name }}'
+              actor = '${{ github.actor }}'
+              ref = '${{ github.ref }}'
+              sha = '${{ github.sha }}'
+              shortSha = '${{ steps.release_meta.outputs.short_sha }}'
+            }
             release = [ordered]@{
               kind = 'service-base-ghcr'
               version = '${{ steps.release_meta.outputs.version }}'
@@ -174,20 +304,25 @@ jobs:
               platform = '${{ steps.release_meta.outputs.platform }}'
               digest = '${{ steps.build_push.outputs.digest }}'
               tags = $tags
-              commit = '${{ github.sha }}'
-              actor = '${{ github.actor }}'
               runSmoke = ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true')
             }
+            distribution = $distribution
           }
+
           $manifestPath = Join-Path $PWD 'service-base-release-manifest.json'
-          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+          $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
           "path=$manifestPath" >> $env:GITHUB_OUTPUT
 
       - name: Write Release Notes
         id: notes
         shell: pwsh
         run: |
-          $tags = '${{ steps.release_meta.outputs.tags }}'.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+          $tagsRaw = @'
+          ${{ steps.release_meta.outputs.tags }}
+          '@
+          $tags = @(
+            $tagsRaw -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+          )
           $lines = @(
             '## EasyProtocol Service Base GHCR'
             ''
@@ -196,10 +331,18 @@ jobs:
             ('- Digest: `${{ steps.build_push.outputs.digest }}`')
             ('- Commit: `${{ github.sha }}`')
             ('- Smoke: ' + ($(if ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true') { 'passed' } else { 'skipped' })))
+            ('- R2 manifest key: `${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}`')
             ''
             '### Tags'
           )
           $lines += ($tags | ForEach-Object { '- `' + $_ + '`' })
+          $lines += @(
+            ''
+            '### Encrypted Import Code'
+            ''
+            '- Artifact: `service-base-import-code-encrypted`'
+            '- Decrypt locally with: `python scripts/easyprotocol-import-code.py decrypt --encrypted-file <downloaded-json> --private-key-file <owner-private-key.txt> --import-code-only`'
+          )
           $notesPath = Join-Path $PWD 'service-base-release-notes.md'
           $lines | Set-Content -LiteralPath $notesPath -Encoding UTF8
           "path=$notesPath" >> $env:GITHUB_OUTPUT
@@ -209,6 +352,18 @@ jobs:
         with:
           name: service-base-release-manifest
           path: ${{ steps.manifest.outputs.path }}
+
+      - name: Upload Runtime Config Distribution Manifest
+        uses: actions/upload-artifact@v6
+        with:
+          name: service-base-r2-config-manifest
+          path: ${{ steps.runtime_config_upload.outputs.path }}
+
+      - name: Upload Encrypted Import Code
+        uses: actions/upload-artifact@v6
+        with:
+          name: service-base-import-code-encrypted
+          path: ${{ steps.import_code.outputs.encrypted_path }}
 
       - name: Upload Release Notes
         uses: actions/upload-artifact@v6
@@ -224,10 +379,11 @@ jobs:
           body_path: ${{ steps.notes.outputs.path }}
           files: |
             ${{ steps.manifest.outputs.path }}
+            ${{ steps.runtime_config_upload.outputs.path }}
+            ${{ steps.import_code.outputs.encrypted_path }}
             ${{ steps.notes.outputs.path }}
 
       - name: Write Release Summary
         shell: bash
         run: |
           cat "${{ steps.notes.outputs.path }}" >> "${GITHUB_STEP_SUMMARY}"
-

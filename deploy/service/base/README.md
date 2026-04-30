@@ -9,6 +9,8 @@ the EasyProtocol gateway runtime.
 - canonical state dir: `/var/lib/easy-protocol`
 - minimum container environment:
   - `EASY_PROTOCOL_CONFIG_PATH`
+  - `EASY_PROTOCOL_RUNTIME_ENV_PATH`
+  - `EASY_PROTOCOL_BOOTSTRAP_PATH`
   - `EASY_PROTOCOL_STATE_DIR`
   - `EASY_PROTOCOL_RESET_STORE_ON_BOOT`
 
@@ -23,7 +25,9 @@ edited directly in tracked deploy-local files.
 - `config.template.yaml`
   - template used by the root render flow
 - `docker-entrypoint.sh`
-  - prepares default config and state directories
+  - prepares default config and state directories and can bootstrap from R2
+- `bootstrap-service-config.py`
+  - fetches rendered runtime config artifacts from private R2
 - `docker-compose.yaml`
   - local docker compose entrypoint for the gateway runtime
 - `scripts/publish-ghcr-easy-protocol-service.ps1`
@@ -43,6 +47,25 @@ runs:
 The generated output currently lands in:
 
 - `deploy/service/base/config/config.yaml`
+- `deploy/service/base/config/runtime.env`
+
+## Import-Code Bootstrap
+
+The service-base image can now start from a plain rendered config or from a
+private R2 bootstrap flow.
+
+Supported startup inputs:
+
+- mounted `config.yaml`
+- mounted bootstrap file at `/etc/easy-protocol/bootstrap/r2-bootstrap.json`
+- `EASY_PROTOCOL_IMPORT_CODE`, which is converted into a bootstrap file at
+  container startup
+
+The import-code helpers live at repo root:
+
+- `scripts/easyprotocol-import-code.py`
+- `scripts/write-service-base-r2-bootstrap.ps1`
+- `scripts/decrypt-import-code.ps1`
 
 ## Current Integration Boundary
 

@@ -19,6 +19,7 @@ The render entrypoint is:
 It currently generates:
 
 - `deploy/service/base/config/config.yaml`
+- `deploy/service/base/config/runtime.env`
 - `deploy/stacks/easy-protocol/generated/easy-protocol.config.yaml`
 - `deploy/stacks/easy-protocol/generated/stack.env`
 
@@ -70,6 +71,10 @@ the external Docker network `EasyAiMi`.
 ### `publishing`
 
 Used for hosted release automation such as GHCR publishing.
+
+The hosted service-base publish flow now also distributes rendered runtime
+artifacts through private R2. Those distribution credentials stay in GitHub
+Actions repository secrets instead of tracked YAML.
 
 ## Security Rules
 

@@ -20,9 +20,12 @@ workflow:
 2. renders the gateway config from the root config
 3. optionally runs a local smoke image check
 4. publishes the gateway image to GHCR
-5. emits a release manifest JSON artifact
-6. emits release notes markdown
-7. creates a GitHub Release on tag-triggered runs
+5. uploads the rendered `service/base` runtime config and `runtime.env` to
+   private R2
+6. generates an owner-only encrypted import-code artifact
+7. emits a release manifest JSON artifact
+8. emits release notes markdown
+9. creates a GitHub Release on tag-triggered runs
 
 ## Provider Image Publish Workflow
 
@@ -62,5 +65,21 @@ That local flow currently performs:
 
 The first hosted release path currently covers the gateway image only.
 
-The remaining missing layer is a remote deploy workflow. That should wait until
-the final public deployment target is explicitly chosen.
+The publish workflow now also produces the bootstrap material needed by a new
+instance:
+
+- `service-base-r2-config-manifest`
+- `service-base-import-code-encrypted`
+
+The plain import code is not published. Keep the matching private key local and
+recover it with:
+
+```powershell
+pwsh .\scripts\decrypt-import-code.ps1 `
+  -EncryptedFilePath .\service-base-import-code.encrypted.json `
+  -PrivateKeyPath C:\path\to\easyprotocol_import_code_owner_private.txt `
+  -ImportCodeOnly
+```
+
+The remaining missing layer is a remote deploy workflow. That should still
+wait until the final public deployment target is explicitly chosen.

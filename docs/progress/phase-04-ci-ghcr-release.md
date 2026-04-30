@@ -21,3 +21,5 @@
 - CI is net-new for this migration line.
 - Follow the EasyEmail pattern of rooted workflows and release manifests.
 - Hosted publish scope now covers the gateway image and provider images.
+- Hosted gateway publish now also uploads rendered runtime config to private R2
+  and emits an encrypted owner-only import code artifact.

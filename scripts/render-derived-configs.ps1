@@ -3,6 +3,7 @@ param(
     [switch]$ServiceBase,
     [switch]$EasyProtocol,
     [string]$ServiceOutput = 'deploy/service/base/config/config.yaml',
+    [string]$ServiceEnvOutput = 'deploy/service/base/config/runtime.env',
     [string]$StackConfigOutput = 'deploy/stacks/easy-protocol/generated/easy-protocol.config.yaml',
     [string]$StackEnvOutput = 'deploy/stacks/easy-protocol/generated/stack.env'
 )
@@ -28,6 +29,7 @@ $resolvedConfigPath = Resolve-EasyProtocolPath -Path $ConfigPath
 $args = @($renderer, '--root-config', $resolvedConfigPath)
 if ($ServiceBase) {
     $args += @('--service-output', (Join-Path (Get-EasyProtocolRepoRoot) $ServiceOutput))
+    $args += @('--service-env-output', (Join-Path (Get-EasyProtocolRepoRoot) $ServiceEnvOutput))
 }
 if ($EasyProtocol) {
     $args += @('--stack-config-output', (Join-Path (Get-EasyProtocolRepoRoot) $StackConfigOutput))
@@ -41,6 +43,7 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($ServiceBase) {
     Write-Host "Service config rendered: $ServiceOutput"
+    Write-Host "Service env rendered: $ServiceEnvOutput"
 }
 if ($EasyProtocol) {
     Write-Host "EasyProtocol stack config rendered: $StackConfigOutput"
