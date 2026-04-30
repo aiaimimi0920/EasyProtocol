@@ -33,6 +33,12 @@ These are used to authenticate the image push:
 If username or token are omitted, the workflow falls back to `github.actor` and
 `GITHUB_TOKEN` where possible.
 
+For provider-image publish, that fallback is only valid when the resolved GHCR
+owner stays inside `GITHUB_REPOSITORY_OWNER`. If
+`EASYPROTOCOL_PUBLISH_GHCR_OWNER` points at a different owner or organization,
+set both `EASYPROTOCOL_PUBLISH_GHCR_USERNAME` and
+`EASYPROTOCOL_PUBLISH_GHCR_TOKEN` explicitly.
+
 ## Hosted Config Materialization Secrets
 
 These secrets are merged into a temporary root `config.yaml` during hosted
@@ -74,7 +80,29 @@ Optional host-path overrides for self-hosted workflows:
 `config.yaml` and `runtime.env`, uploads them to a private R2 bucket, and emits
 an encrypted owner-only import-code artifact.
 
-Add these repository secrets:
+The workflow resolves this secret set in two layers:
+
+1. prefer the dedicated `EASYPROTOCOL_R2_CONFIG_*` secrets
+2. fall back to the already-used provider register-output R2 secrets when the
+   field semantics are equivalent
+
+That means the hosted publish path can reuse these existing secrets when a
+separate config-distribution credential set has not been created yet:
+
+- `EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCOUNT_ID`
+- `EASYPROTOCOL_PROVIDER_REGISTER_R2_BUCKET`
+- `EASYPROTOCOL_PROVIDER_REGISTER_R2_ENDPOINT_URL`
+- `EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCESS_KEY_ID`
+- `EASYPROTOCOL_PROVIDER_REGISTER_R2_SECRET_ACCESS_KEY`
+
+If the dedicated object-key secrets are omitted, the workflow now defaults to:
+
+- `easyprotocol/service-base/config.yaml`
+- `easyprotocol/service-base/runtime.env`
+- `easyprotocol/service-base/distribution-manifest.json`
+
+Add these repository secrets when you need to override the fallback behavior or
+separate config-distribution storage from register-output storage:
 
 | Secret name | Purpose | Format |
 | --- | --- | --- |
@@ -101,9 +129,14 @@ After the R2 upload finishes, the workflow also generates an EasyProtocol
 import code and immediately encrypts it with
 `EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY`.
 
-The workflow publishes only the encrypted artifact:
+If the public key is present, the workflow publishes only the encrypted
+artifact:
 
 - `service-base-import-code-encrypted`
+
+If `EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY` is absent, the image publish and
+R2 config upload still continue, but the encrypted import-code artifact is
+skipped.
 
 To recover the plain import code locally, keep the matching private key on the
 trusted operator machine and run:
@@ -153,3 +186,8 @@ That means a new instance can start from:
   - validates provider release tags
   - materializes config
   - publishes one or all provider images to GHCR
+  - pushes repo-scoped packages:
+    - `easy-protocol-python-service`
+    - `easy-protocol-go-service`
+    - `easy-protocol-javascript-service`
+    - `easy-protocol-rust-service`

@@ -34,6 +34,8 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      REGISTRY: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_REGISTRY != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_REGISTRY || 'ghcr.io' }}
 
     steps:
       - name: Check Out Repository
@@ -92,7 +94,7 @@ jobs:
       - name: Log In To GHCR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME || github.actor }}
           password: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
@@ -105,4 +107,3 @@ jobs:
           -ReleaseTag "${{ steps.release_meta.outputs.version }}"
           -Platform "${{ steps.release_meta.outputs.platform }}"
           -Push
-

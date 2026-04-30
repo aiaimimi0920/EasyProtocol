@@ -12,6 +12,37 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'lib/easyprotocol-config.ps1')
 
+function Resolve-PublishedProviderImageName {
+    param(
+        [ValidateSet('python', 'go', 'javascript', 'rust')]
+        [string]$Provider,
+        [string]$ConfiguredImage
+    )
+
+    $configuredName = [string]($ConfiguredImage -replace '^.+/', '' -replace ':.+$', '')
+    $defaultPublishedName = switch ($Provider) {
+        'python' { 'easy-protocol-python-service' }
+        'go' { 'easy-protocol-go-service' }
+        'javascript' { 'easy-protocol-javascript-service' }
+        'rust' { 'easy-protocol-rust-service' }
+        default { throw "Unsupported provider: $Provider" }
+    }
+
+    $legacyNames = switch ($Provider) {
+        'python' { @('python-protocol-service', 'easy-protocol-python-service') }
+        'go' { @('go-protocol-service', 'golang-protocol-service', 'easy-protocol-go-service') }
+        'javascript' { @('javascript-protocol-service', 'js-protocol-service', 'easy-protocol-javascript-service') }
+        'rust' { @('rust-protocol-service', 'easy-protocol-rust-service') }
+        default { @() }
+    }
+
+    if ($legacyNames -contains $configuredName) {
+        return $defaultPublishedName
+    }
+
+    return $configuredName
+}
+
 $config = Read-EasyProtocolConfig -ConfigPath $ConfigPath
 $ghcr = if ($config.publishing) { $config.publishing.ghcr } else { $null }
 $registry = if ($ghcr -and $ghcr.registry) {
@@ -34,6 +65,21 @@ $owner = [string]$owner
 if (-not [string]::IsNullOrWhiteSpace($owner)) {
     $owner = $owner.ToLowerInvariant()
 }
+$repoOwner = [string]$env:GITHUB_REPOSITORY_OWNER
+if (-not [string]::IsNullOrWhiteSpace($repoOwner)) {
+    $repoOwner = $repoOwner.ToLowerInvariant()
+}
+$hasExplicitGhcrCreds = (-not [string]::IsNullOrWhiteSpace([string]$env:EASYPROTOCOL_PUBLISH_GHCR_USERNAME)) -and `
+    (-not [string]::IsNullOrWhiteSpace([string]$env:EASYPROTOCOL_PUBLISH_GHCR_TOKEN))
+
+if (
+    -not [string]::IsNullOrWhiteSpace($owner) -and
+    -not [string]::IsNullOrWhiteSpace($repoOwner) -and
+    $owner -ne $repoOwner -and
+    -not $hasExplicitGhcrCreds
+) {
+    throw "Cross-owner provider publish requires EASYPROTOCOL_PUBLISH_GHCR_USERNAME and EASYPROTOCOL_PUBLISH_GHCR_TOKEN. targetOwner=$owner repoOwner=$repoOwner"
+}
 
 $targets = if ($Target -eq 'all') { @('python', 'go', 'javascript', 'rust') } else { @($Target) }
 
@@ -47,7 +93,7 @@ foreach ($provider in $targets) {
     if ([string]::IsNullOrWhiteSpace($owner)) {
         $imageRef = $configuredImage
     } else {
-        $imageName = [string]($configuredImage -replace '^.+/', '' -replace ':.+$', '')
+        $imageName = Resolve-PublishedProviderImageName -Provider $provider -ConfiguredImage $configuredImage
         $imageRef = "$registry/$owner/${imageName}:$ReleaseTag"
     }
 

@@ -41,10 +41,16 @@ The provider-image workflow currently supports:
 
 It publishes:
 
-- `python-protocol-service`
-- `go-protocol-service`
-- `javascript-protocol-service`
-- `rust-protocol-service`
+- `easy-protocol-python-service`
+- `easy-protocol-go-service`
+- `easy-protocol-javascript-service`
+- `easy-protocol-rust-service`
+
+The provider publish path also enforces the same owner boundary as the working
+repos. If `EASYPROTOCOL_PUBLISH_GHCR_OWNER` points outside
+`GITHUB_REPOSITORY_OWNER`, the workflow now requires explicit
+`EASYPROTOCOL_PUBLISH_GHCR_USERNAME` and `EASYPROTOCOL_PUBLISH_GHCR_TOKEN`
+instead of silently relying on `GITHUB_TOKEN`.
 
 ## Local Equivalent
 

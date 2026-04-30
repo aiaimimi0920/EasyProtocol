@@ -80,6 +80,31 @@ jobs:
         shell: pwsh
         run: ./scripts/render-derived-configs.ps1 -ConfigPath ./config.yaml -ServiceBase
 
+      - name: Resolve Service Base Release Secrets
+        id: runtime_config_secrets
+        env:
+          EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID }}
+          EASYPROTOCOL_R2_CONFIG_BUCKET: ${{ secrets.EASYPROTOCOL_R2_CONFIG_BUCKET }}
+          EASYPROTOCOL_R2_CONFIG_ENDPOINT: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENDPOINT }}
+          EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}
+          EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID }}
+          EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY }}
+          EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID }}
+          EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCESS_KEY_ID }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_SECRET_ACCESS_KEY }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCOUNT_ID }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_BUCKET: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_BUCKET }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ENDPOINT_URL: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ENDPOINT_URL }}
+          EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY: ${{ secrets.EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY }}
+        shell: pwsh
+        run: >
+          ./scripts/resolve-service-base-release-secrets.ps1
+          -GithubEnvPath $env:GITHUB_ENV
+          -GithubOutputPath $env:GITHUB_OUTPUT
+
       - name: Resolve Release Metadata
         id: release_meta
         shell: bash
@@ -172,31 +197,8 @@ jobs:
 
       - name: Upload Service Base Runtime Config To R2
         id: runtime_config_upload
-        env:
-          EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID }}
-          EASYPROTOCOL_R2_CONFIG_BUCKET: ${{ secrets.EASYPROTOCOL_R2_CONFIG_BUCKET }}
-          EASYPROTOCOL_R2_CONFIG_ENDPOINT: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENDPOINT }}
-          EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY }}
-          EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY }}
-          EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}
-          EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID }}
-          EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY }}
         shell: pwsh
         run: |
-          foreach ($name in @(
-            'EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID',
-            'EASYPROTOCOL_R2_CONFIG_BUCKET',
-            'EASYPROTOCOL_R2_CONFIG_CONFIG_OBJECT_KEY',
-            'EASYPROTOCOL_R2_CONFIG_ENV_OBJECT_KEY',
-            'EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY',
-            'EASYPROTOCOL_R2_CONFIG_UPLOAD_ACCESS_KEY_ID',
-            'EASYPROTOCOL_R2_CONFIG_UPLOAD_SECRET_ACCESS_KEY'
-          )) {
-            if ([string]::IsNullOrWhiteSpace([string](Get-Item "Env:$name").Value)) {
-              throw "Missing required R2 config secret: $name"
-            }
-          }
-
           $manifestPath = Join-Path $PWD 'service-base-r2-config-manifest.json'
           .\scripts\upload-service-base-r2-config.ps1 `
             -ConfigPath .\config.yaml `
@@ -215,14 +217,7 @@ jobs:
 
       - name: Generate Encrypted Owner Import Code
         id: import_code
-        env:
-          EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ACCOUNT_ID }}
-          EASYPROTOCOL_R2_CONFIG_BUCKET: ${{ secrets.EASYPROTOCOL_R2_CONFIG_BUCKET }}
-          EASYPROTOCOL_R2_CONFIG_ENDPOINT: ${{ secrets.EASYPROTOCOL_R2_CONFIG_ENDPOINT }}
-          EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}
-          EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_ACCESS_KEY_ID }}
-          EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_R2_CONFIG_READ_SECRET_ACCESS_KEY }}
-          EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY: ${{ secrets.EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY }}
+        if: steps.runtime_config_secrets.outputs.import_code_enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -331,18 +326,20 @@ jobs:
             ('- Digest: `${{ steps.build_push.outputs.digest }}`')
             ('- Commit: `${{ github.sha }}`')
             ('- Smoke: ' + ($(if ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true') { 'passed' } else { 'skipped' })))
-            ('- R2 manifest key: `${{ secrets.EASYPROTOCOL_R2_CONFIG_MANIFEST_OBJECT_KEY }}`')
+            ('- R2 manifest key: `${{ steps.runtime_config_secrets.outputs.manifest_object_key }}`')
             ''
             '### Tags'
           )
           $lines += ($tags | ForEach-Object { '- `' + $_ + '`' })
-          $lines += @(
-            ''
-            '### Encrypted Import Code'
-            ''
-            '- Artifact: `service-base-import-code-encrypted`'
-            '- Decrypt locally with: `python scripts/easyprotocol-import-code.py decrypt --encrypted-file <downloaded-json> --private-key-file <owner-private-key.txt> --import-code-only`'
-          )
+          if ('${{ steps.runtime_config_secrets.outputs.import_code_enabled }}' -eq 'true') {
+            $lines += @(
+              ''
+              '### Encrypted Import Code'
+              ''
+              '- Artifact: `service-base-import-code-encrypted`'
+              '- Decrypt locally with: `python scripts/easyprotocol-import-code.py decrypt --encrypted-file <downloaded-json> --private-key-file <owner-private-key.txt> --import-code-only`'
+            )
+          }
           $notesPath = Join-Path $PWD 'service-base-release-notes.md'
           $lines | Set-Content -LiteralPath $notesPath -Encoding UTF8
           "path=$notesPath" >> $env:GITHUB_OUTPUT
@@ -360,6 +357,7 @@ jobs:
           path: ${{ steps.runtime_config_upload.outputs.path }}
 
       - name: Upload Encrypted Import Code
+        if: steps.runtime_config_secrets.outputs.import_code_enabled == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: service-base-import-code-encrypted
@@ -380,10 +378,19 @@ jobs:
           files: |
             ${{ steps.manifest.outputs.path }}
             ${{ steps.runtime_config_upload.outputs.path }}
-            ${{ steps.import_code.outputs.encrypted_path }}
             ${{ steps.notes.outputs.path }}
 
       - name: Write Release Summary
         shell: bash
         run: |
           cat "${{ steps.notes.outputs.path }}" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${{ steps.runtime_config_secrets.outputs.import_code_enabled }}" == "true" ]]; then
+            {
+              echo
+              echo "## Encrypted Import Code"
+              echo
+              echo "- Artifact: \`service-base-import-code-encrypted\`"
+              echo "- Manifest key: \`${{ steps.runtime_config_secrets.outputs.manifest_object_key }}\`"
+              echo "- Decrypt locally with: \`python scripts/easyprotocol-import-code.py decrypt --encrypted-file <downloaded-json> --private-key-file <owner-private-key.txt> --import-code-only\`"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
