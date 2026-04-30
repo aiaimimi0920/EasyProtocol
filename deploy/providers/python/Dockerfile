@@ -14,7 +14,10 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
     && apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends ca-certificates golang \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir --retries 10 --timeout 300 boto3 curl-cffi
+    && python -m pip install --no-cache-dir --retries 10 --timeout 300 \
+        --index-url https://mirrors.aliyun.com/pypi/simple \
+        --trusted-host mirrors.aliyun.com \
+        boto3 curl-cffi
 
 EXPOSE 9100
 CMD ["python", "src/server.py"]
