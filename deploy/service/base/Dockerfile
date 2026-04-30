@@ -23,9 +23,10 @@ COPY deploy/service/base/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.s
 COPY deploy/service/base/bootstrap-service-config.py /usr/local/bin/bootstrap-service-config.py
 COPY scripts/easyprotocol-import-code.py /usr/local/bin/easyprotocol-import-code.py
 
-RUN apt-get -o Acquire::Retries=5 update \
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends ca-certificates gosu python3 python3-pip \
-    && python3 -m pip install --no-cache-dir --break-system-packages boto3 pynacl \
+    && python3 -m pip install --no-cache-dir --retries 10 --timeout 300 --break-system-packages boto3 pynacl \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 easy \

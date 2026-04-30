@@ -11,7 +11,7 @@ x-python-protocol-common: &python-protocol-common
     MAILBOX_SERVICE_BASE_URL: http://easy-email-service:8080
     MAILBOX_SERVICE_API_KEY: ${MAILBOX_SERVICE_API_KEY}
     MAILBOX_SERVICE_REQUEST_ATTEMPTS: ${MAILBOX_SERVICE_REQUEST_ATTEMPTS:-8}
-    EASY_PROXY_BASE_URL: http://easy-proxy-service:9888
+    EASY_PROXY_BASE_URL: http://easy-proxy-service:29888
     EASY_PROXY_API_KEY: ${EASY_PROXY_API_KEY}
     REGISTER_ENABLE_EASY_PROXY: "true"
     REGISTER_REQUIRE_EASY_PROXY: "true"
@@ -41,7 +41,7 @@ x-python-protocol-common: &python-protocol-common
 services:
   easy-email-service:
     build:
-      context: ../../../EasyEmail
+      context: ../../../../EasyEmail
       dockerfile: deploy/service/base/Dockerfile
     image: easyemail/easy-email-service:local
     container_name: easyemail-service-base
@@ -49,14 +49,14 @@ services:
     ports:
       - "18080:8080"
     env_file:
-      - ../../../EasyEmail/deploy/service/base/config/runtime.env
+      - ../../../../EasyEmail/deploy/service/base/config/runtime.env
     environment:
       EASY_EMAIL_CONFIG_PATH: /etc/easy-email/config.yaml
       EASY_EMAIL_RUNTIME_ENV_PATH: /etc/easy-email/runtime.env
       EASY_EMAIL_BOOTSTRAP_PATH: /etc/easy-email/bootstrap/r2-bootstrap.json
       EASY_EMAIL_STATE_DIR: /var/lib/easy-email
       EASY_EMAIL_RESET_STORE_ON_BOOT: "${EASY_EMAIL_RESET_STORE_ON_BOOT:-false}"
-      EASY_PROXY_BASE_URL: http://easy-proxy-service:9888
+      EASY_PROXY_BASE_URL: http://easy-proxy-service:29888
       EASY_PROXY_API_KEY: ${EASY_PROXY_API_KEY}
       EASY_PROXY_RUNTIME_HOST: easy-proxy-service
       EASY_PROXY_HOST_ID: easy-email-service
@@ -64,8 +64,8 @@ services:
       M2U_EASY_PROXY_REQUIRE_DEDICATED_NODE: "true"
       M2U_EASY_PROXY_MAX_ATTEMPTS: "${M2U_EASY_PROXY_MAX_ATTEMPTS:-10}"
     volumes:
-      - ../../../EasyEmail/deploy/service/base/config:/etc/easy-email
-      - ../../../EasyEmail/deploy/service/base/data:/var/lib/easy-email
+      - ../../../../EasyEmail/deploy/service/base/config:/etc/easy-email
+      - ../../../../EasyEmail/deploy/service/base/data:/var/lib/easy-email
     networks:
       Easy:
         aliases:
@@ -73,18 +73,18 @@ services:
 
   easy-proxy-service:
     build:
-      context: ../../../EasyProxy
+      context: ../../../../EasyProxy
       dockerfile: deploy/service/base/Dockerfile
     image: easyproxy/easy-proxy-monorepo-service:local
     container_name: easy-proxy-monorepo-service
     restart: unless-stopped
     ports:
       - "2323:2323"
-      - "19888:9888"
+      - "19888:29888"
       - "24000-24500:24000-24500"
     volumes:
-      - ../../../EasyProxy/deploy/service/base/config.yaml:/etc/easy-proxy/config.yaml
-      - ../../../EasyProxy/deploy/service/base/data:/var/lib/easy-proxy
+      - ../../../../EasyProxy/deploy/service/base/config.yaml:/etc/easy-proxy/config.yaml
+      - ../../../../EasyProxy/deploy/service/base/data:/var/lib/easy-proxy
     networks:
       Easy:
         aliases:

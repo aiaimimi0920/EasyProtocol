@@ -11,7 +11,7 @@ from typing import Any
 
 
 EASY_PROXY_BASE_URL = (
-    os.environ.get("EASY_PROXY_BASE_URL") or "http://127.0.0.1:9888"
+    os.environ.get("EASY_PROXY_BASE_URL") or "http://127.0.0.1:29888"
 ).strip()
 EASY_PROXY_API_KEY = (os.environ.get("EASY_PROXY_API_KEY") or "").strip()
 EASY_PROXY_HOST_ID = (

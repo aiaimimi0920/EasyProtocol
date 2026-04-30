@@ -10,10 +10,11 @@ ENV PYTHON_PROTOCOL_HOST=0.0.0.0 \
 COPY providers/python/src ./src
 COPY providers/python/python_shared ./python_shared
 
-RUN apt-get -o Acquire::Retries=5 update \
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends ca-certificates golang \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir boto3 curl-cffi
+    && pip install --no-cache-dir --retries 10 --timeout 300 boto3 curl-cffi
 
 EXPOSE 9100
 CMD ["python", "src/server.py"]

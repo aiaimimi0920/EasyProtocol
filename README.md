@@ -9,6 +9,12 @@ This repository intentionally avoids submodules. External contributors should
 only need one repository checkout to inspect, build, test, and release the
 main gateway and its provider runtimes.
 
+## Development Workflow
+
+See `docs/development-workflow.md` for the shared cross-repository development
+rules used for local-first iteration, temporary test assets, and final
+GHCR-based validation.
+
 ## Planned Repository Layout
 
 ```text

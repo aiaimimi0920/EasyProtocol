@@ -20,13 +20,18 @@ Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
 
 $stackRoot = Join-Path $repoRoot 'deploy/stacks/easy-protocol'
 $generatedDataRoot = Join-Path $stackRoot 'data/easy-protocol'
+$generatedEnvFile = Join-Path $stackRoot 'generated/stack.env'
 New-Item -ItemType Directory -Force -Path $generatedDataRoot | Out-Null
+
+if (-not (Test-Path -LiteralPath $generatedEnvFile)) {
+    throw "Missing generated stack env file: $generatedEnvFile"
+}
 
 $composeFile = Join-Path $stackRoot 'docker-compose.yaml'
 if ($NoBuild) {
-    docker compose -f $composeFile up -d
+    docker compose --env-file $generatedEnvFile -f $composeFile up -d
 } else {
-    docker compose -f $composeFile up -d --build
+    docker compose --env-file $generatedEnvFile -f $composeFile up -d --build
 }
 
 if ($LASTEXITCODE -ne 0) {
@@ -34,4 +39,3 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host 'easy-protocol stack deployment finished.' -ForegroundColor Green
-

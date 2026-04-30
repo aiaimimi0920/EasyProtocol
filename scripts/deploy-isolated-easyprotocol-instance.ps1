@@ -3,6 +3,7 @@ param(
     [string]$ConfigPath = 'config.yaml',
     [int]$GatewayHostPort = 29789,
     [int]$PythonManagerHostPort = 29103,
+    [string]$InstanceRoot = '',
     [switch]$NoBuild
 )
 
@@ -20,6 +21,16 @@ function Find-FreeTcpPort {
     } finally {
         $listener.Stop()
     }
+}
+
+function Get-DefaultInstanceRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $gameEditorRoot = Split-Path -Parent $RepoRoot
+    return (Join-Path $gameEditorRoot 'linshi\EasyProtocol\instances')
 }
 
 $repoRoot = Get-EasyProtocolRepoRoot
@@ -65,7 +76,15 @@ if (-not $NoBuild) {
 
 Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
 
-$instanceRoot = Join-Path $repoRoot ".tmp\\instances\\$InstanceName"
+$instanceRootBase = if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
+    Get-DefaultInstanceRoot -RepoRoot $repoRoot
+} elseif ([System.IO.Path]::IsPathRooted($InstanceRoot)) {
+    $InstanceRoot
+} else {
+    Join-Path $repoRoot $InstanceRoot
+}
+
+$instanceRoot = Join-Path $instanceRootBase $InstanceName
 $configDir = Join-Path $instanceRoot 'gateway-config'
 $dataDir = Join-Path $instanceRoot 'gateway-data'
 $envFile = Join-Path $instanceRoot 'python-manager.env'
