@@ -71,6 +71,10 @@ try {
 } finally {
   docker rm -f $containerName 2>$null | Out-Null
   if (Test-Path -LiteralPath $instanceRoot) {
-    Remove-Item -LiteralPath $instanceRoot -Recurse -Force
+    try {
+      Remove-Item -LiteralPath $instanceRoot -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning "Failed to remove smoke temp directory '$instanceRoot': $($_.Exception.Message)"
+    }
   }
 }
