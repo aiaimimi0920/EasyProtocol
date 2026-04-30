@@ -448,8 +448,6 @@ def _wrap_protocol_error(
 @contextlib.contextmanager
 def _protocol_only_env() -> Iterator[None]:
     managed_keys = (
-        PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV,
-        PROTOCOL_ENABLE_BROWSER_SENTINEL_ENV,
         PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV,
     )
     previous: dict[str, str | None] = {}
