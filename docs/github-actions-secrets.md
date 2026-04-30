@@ -138,6 +138,11 @@ If `EASYPROTOCOL_IMPORT_CODE_OWNER_PUBLIC_KEY` is absent, the image publish and
 R2 config upload still continue, but the encrypted import-code artifact is
 skipped.
 
+If no complete runtime-config credential set can be resolved after fallback,
+the workflow still publishes the GHCR image and skips only the R2 config
+distribution and encrypted import-code steps. The release notes summarize the
+missing secret names so the credential gap stays visible.
+
 To recover the plain import code locally, keep the matching private key on the
 trusted operator machine and run:
 

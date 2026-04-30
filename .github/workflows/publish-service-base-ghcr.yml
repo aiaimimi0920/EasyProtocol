@@ -197,6 +197,7 @@ jobs:
 
       - name: Upload Service Base Runtime Config To R2
         id: runtime_config_upload
+        if: steps.runtime_config_secrets.outputs.runtime_config_enabled == 'true'
         shell: pwsh
         run: |
           $manifestPath = Join-Path $PWD 'service-base-r2-config-manifest.json'
@@ -326,11 +327,21 @@ jobs:
             ('- Digest: `${{ steps.build_push.outputs.digest }}`')
             ('- Commit: `${{ github.sha }}`')
             ('- Smoke: ' + ($(if ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true') { 'passed' } else { 'skipped' })))
+            ('- Runtime config distribution: ' + $(if ('${{ steps.runtime_config_secrets.outputs.runtime_config_enabled }}' -eq 'true') { 'enabled' } else { 'skipped' }))
             ('- R2 manifest key: `${{ steps.runtime_config_secrets.outputs.manifest_object_key }}`')
             ''
             '### Tags'
           )
           $lines += ($tags | ForEach-Object { '- `' + $_ + '`' })
+          if ('${{ steps.runtime_config_secrets.outputs.runtime_config_enabled }}' -ne 'true') {
+            $lines += @(
+              ''
+              '### Runtime Config Distribution'
+              ''
+              '- Status: skipped'
+              '- Missing secret group: `${{ steps.runtime_config_secrets.outputs.missing_runtime_config_secrets }}`'
+            )
+          }
           if ('${{ steps.runtime_config_secrets.outputs.import_code_enabled }}' -eq 'true') {
             $lines += @(
               ''
@@ -351,6 +362,7 @@ jobs:
           path: ${{ steps.manifest.outputs.path }}
 
       - name: Upload Runtime Config Distribution Manifest
+        if: steps.runtime_config_secrets.outputs.runtime_config_enabled == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: service-base-r2-config-manifest
@@ -384,6 +396,15 @@ jobs:
         shell: bash
         run: |
           cat "${{ steps.notes.outputs.path }}" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${{ steps.runtime_config_secrets.outputs.runtime_config_enabled }}" != "true" ]]; then
+            {
+              echo
+              echo "## Runtime Config Distribution"
+              echo
+              echo "- Status: skipped"
+              echo "- Missing secret group: \`${{ steps.runtime_config_secrets.outputs.missing_runtime_config_secrets }}\`"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
           if [[ "${{ steps.runtime_config_secrets.outputs.import_code_enabled }}" == "true" ]]; then
             {
               echo
