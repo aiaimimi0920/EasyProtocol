@@ -14,8 +14,26 @@ $ErrorActionPreference = 'Stop'
 
 $config = Read-EasyProtocolConfig -ConfigPath $ConfigPath
 $ghcr = if ($config.publishing) { $config.publishing.ghcr } else { $null }
-$registry = if ($ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
-$owner = if ($ghcr -and $ghcr.owner) { [string]$ghcr.owner } else { '' }
+$registry = if ($ghcr -and $ghcr.registry) {
+    [string]$ghcr.registry
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$env:EASYPROTOCOL_PUBLISH_GHCR_REGISTRY)) {
+    [string]$env:EASYPROTOCOL_PUBLISH_GHCR_REGISTRY
+} else {
+    'ghcr.io'
+}
+$owner = if ($ghcr -and $ghcr.owner) {
+    [string]$ghcr.owner
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$env:EASYPROTOCOL_PUBLISH_GHCR_OWNER)) {
+    [string]$env:EASYPROTOCOL_PUBLISH_GHCR_OWNER
+} elseif (-not [string]::IsNullOrWhiteSpace([string]$env:GITHUB_REPOSITORY_OWNER)) {
+    [string]$env:GITHUB_REPOSITORY_OWNER
+} else {
+    ''
+}
+$owner = [string]$owner
+if (-not [string]::IsNullOrWhiteSpace($owner)) {
+    $owner = $owner.ToLowerInvariant()
+}
 
 $targets = if ($Target -eq 'all') { @('python', 'go', 'javascript', 'rust') } else { @($Target) }
 
