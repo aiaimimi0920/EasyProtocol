@@ -1,0 +1,46 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v6
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Set Up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: service/base/go.mod
+
+      - name: Set Up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python Dependencies
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: Create Local Operator Config
+        shell: pwsh
+        run: Copy-Item config.example.yaml config.yaml
+
+      - name: Run Repository Validation
+        shell: pwsh
+        run: ./scripts/test-all.ps1 -ConfigPath ./config.yaml
+

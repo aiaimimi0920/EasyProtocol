@@ -1,0 +1,9 @@
+kind: strategy_selector
+version: draft
+mode: sequential
+requestId: ""
+operation: ""
+candidateServices: []
+filteredServices: []
+selectedService: ""
+reason: ""

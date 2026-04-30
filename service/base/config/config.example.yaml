@@ -1,0 +1,255 @@
+# EasyProtocol framework configuration skeleton
+
+# Framework mode:
+# - strategy: EasyProtocol decides the language-specific service
+# - specified: caller explicitly selects the language-specific service
+mode: strategy
+
+log_level: info
+
+unified_api:
+  listen: 0.0.0.0:9788
+  password: "123456"
+
+control_plane:
+  enabled: true
+  read_token: "123456"
+  mutate_token: "123456"
+  require_actor: true
+  localhost_only: false
+  allowlist: []
+  token_grace_period: 15m
+
+strategy:
+  # Selector style:
+  # - sequential
+  # - random
+  # - balance
+  mode: balance
+  failure_threshold: 10
+  cooldown_duration: 30m
+  fallback_on_retryable_errors: true
+  max_fallback_attempts: 12
+  retryable_categories:
+    - transport_error
+    - delegation_error
+    - timeout_error
+    - service_unavailable
+    - unsupported_operation
+  preferred_services_by_operation:
+    protocol.echo:
+      - GolangProtocol
+      - JSProtocol
+      - PythonProtocol
+      - RustProtocol
+    protocol.query.encode:
+      - JSProtocol
+      - GolangProtocol
+    protocol.regex.extract:
+      - PythonProtocol
+      - JSProtocol
+    protocol.hash.sha256:
+      - RustProtocol
+      - GolangProtocol
+  operation_policies:
+    protocol.query.encode:
+      fallback_mode: enabled
+      max_fallback_attempts: 2
+    protocol.regex.extract:
+      fallback_mode: enabled
+      max_fallback_attempts: 2
+    protocol.hash.sha256:
+      fallback_mode: enabled
+      max_fallback_attempts: 2
+    protocol.data.flatten:
+      fallback_mode: disabled
+    codex.semantic.step:
+      fallback_mode: enabled
+      max_fallback_attempts: 12
+      retryable_categories:
+        - transport_error
+        - delegation_error
+        - timeout_error
+        - service_unavailable
+        - unsupported_operation
+
+error_attribution:
+  enabled: true
+
+tracing:
+  enabled: true
+  history_limit: 200
+
+persistence:
+  enabled: true
+  runtime_state_path: state/runtime-overrides.json
+  control_plane_state_path: state/control-plane-state.json
+  audit_log_path: state/audit-log.jsonl
+  snapshot_dir: state/runtime-snapshots
+  audit_history_limit: 500
+  snapshot_limit: 200
+
+services:
+  - name: GolangProtocol
+    language: go
+    enabled: true
+    endpoint: http://127.0.0.1:11001
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.headers.normalize
+      - protocol.query.encode
+      - protocol.hash.sha256
+  - name: JSProtocol
+    language: javascript
+    enabled: true
+    endpoint: http://127.0.0.1:11002
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.template.render
+      - protocol.json.compact
+      - protocol.query.encode
+      - protocol.regex.extract
+  - name: PythonProtocol-01
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-01:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-02
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-02:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-03
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-03:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-04
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-04:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-05
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-05:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-06
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-06:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-07
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-07:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-08
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-08:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-09
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-09:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-10
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-10:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-11
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-11:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: PythonProtocol-12
+    language: python
+    enabled: true
+    endpoint: http://python-protocol-service-12:9100
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.regex.extract
+      - protocol.text.slugify
+      - protocol.data.flatten
+      - codex.semantic.step
+  - name: RustProtocol
+    language: rust
+    enabled: true
+    endpoint: http://127.0.0.1:11004
+    supported_operations:
+      - health.inspect
+      - protocol.echo
+      - protocol.hash.sha256
+      - protocol.bytes.hex
+      - protocol.bytes.xor

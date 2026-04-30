@@ -1,0 +1,7 @@
+kind: cooldown_state
+version: draft
+service: ""
+failureCount: 0
+cooled: false
+cooledUntil: ""
+lastErrorCategory: ""

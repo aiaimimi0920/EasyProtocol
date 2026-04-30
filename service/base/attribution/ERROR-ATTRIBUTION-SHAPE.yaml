@@ -1,0 +1,8 @@
+kind: error_attribution
+version: draft
+requestId: ""
+service: ""
+category: ""
+countsTowardCooling: false
+message: ""
+details: {}

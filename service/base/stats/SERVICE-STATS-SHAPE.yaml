@@ -1,0 +1,8 @@
+kind: service_stats
+version: draft
+service: ""
+successCount: 0
+failureCount: 0
+cooldownCount: 0
+activeRequests: 0
+lastErrorCategory: ""

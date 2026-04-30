@@ -1,0 +1,129 @@
+x-python-protocol-common: &python-protocol-common
+  build:
+    context: ../../..
+    dockerfile: deploy/providers/python/Dockerfile
+  image: easyprotocol/python-protocol-service:local
+  restart: unless-stopped
+  environment:
+    PYTHONUNBUFFERED: "1"
+    PYTHON_PROTOCOL_HOST: 0.0.0.0
+    PYTHON_PROTOCOL_PORT: "9100"
+    MAILBOX_SERVICE_BASE_URL: http://easy-email-service:8080
+    MAILBOX_SERVICE_API_KEY: ${MAILBOX_SERVICE_API_KEY}
+    MAILBOX_SERVICE_REQUEST_ATTEMPTS: ${MAILBOX_SERVICE_REQUEST_ATTEMPTS:-8}
+    EASY_PROXY_BASE_URL: http://easy-proxy-service:9888
+    EASY_PROXY_API_KEY: ${EASY_PROXY_API_KEY}
+    REGISTER_ENABLE_EASY_PROXY: "true"
+    REGISTER_REQUIRE_EASY_PROXY: "true"
+    REGISTER_TEAM_AUTH_DIR: /shared/team-auth
+    REGISTER_TEAM_AUTH_GLOB: ${REGISTER_TEAM_AUTH_GLOB:-*-team.json}
+    REGISTER_TEAM_CAPACITY_LIMIT: ${REGISTER_TEAM_CAPACITY_LIMIT:-9}
+    REGISTER_TEAM_INVITE_SWEEP_AGE_SECONDS: ${REGISTER_TEAM_INVITE_SWEEP_AGE_SECONDS:-180}
+    REGISTER_FREE_MANUAL_OAUTH_PRESERVE_ENABLED: ${REGISTER_FREE_MANUAL_OAUTH_PRESERVE_ENABLED:-false}
+    REGISTER_R2_ACCESS_KEY_ID: ${REGISTER_R2_ACCESS_KEY_ID}
+    REGISTER_R2_SECRET_ACCESS_KEY: ${REGISTER_R2_SECRET_ACCESS_KEY}
+    REGISTER_R2_ACCOUNT_ID: ${REGISTER_R2_ACCOUNT_ID}
+    REGISTER_R2_BUCKET: ${REGISTER_R2_BUCKET}
+    REGISTER_R2_ENDPOINT_URL: ${REGISTER_R2_ENDPOINT_URL:-}
+    REGISTER_R2_REGION: ${REGISTER_R2_REGION:-auto}
+    REGISTER_R2_PUBLIC_BASE_URL: ${REGISTER_R2_PUBLIC_BASE_URL:-}
+  volumes:
+    - ${REGISTER_OUTPUT_DIR_HOST}:/shared/register-output
+    - ${REGISTER_TEAM_AUTH_DIR_HOST}:/shared/team-auth:ro
+    - ${REGISTER_TEAM_LOCAL_DIR_HOST:-C:/Users/vmjcv/.cli-proxy-api/team}:/shared/local-team-store
+    - ../../../providers/python/src:/app/src
+    - ../../../providers/python/python_shared:/app/python_shared
+  networks:
+    Easy:
+      aliases:
+        - python-protocol-manager
+
+services:
+  easy-email-service:
+    build:
+      context: ../../../EasyEmail
+      dockerfile: deploy/service/base/Dockerfile
+    image: easyemail/easy-email-service:local
+    container_name: easyemail-service-base
+    restart: unless-stopped
+    ports:
+      - "18080:8080"
+    env_file:
+      - ../../../EasyEmail/deploy/service/base/config/runtime.env
+    environment:
+      EASY_EMAIL_CONFIG_PATH: /etc/easy-email/config.yaml
+      EASY_EMAIL_RUNTIME_ENV_PATH: /etc/easy-email/runtime.env
+      EASY_EMAIL_BOOTSTRAP_PATH: /etc/easy-email/bootstrap/r2-bootstrap.json
+      EASY_EMAIL_STATE_DIR: /var/lib/easy-email
+      EASY_EMAIL_RESET_STORE_ON_BOOT: "${EASY_EMAIL_RESET_STORE_ON_BOOT:-false}"
+      EASY_PROXY_BASE_URL: http://easy-proxy-service:9888
+      EASY_PROXY_API_KEY: ${EASY_PROXY_API_KEY}
+      EASY_PROXY_RUNTIME_HOST: easy-proxy-service
+      EASY_PROXY_HOST_ID: easy-email-service
+      M2U_USE_EASY_PROXY_ON_CAPACITY: "true"
+      M2U_EASY_PROXY_REQUIRE_DEDICATED_NODE: "true"
+      M2U_EASY_PROXY_MAX_ATTEMPTS: "${M2U_EASY_PROXY_MAX_ATTEMPTS:-10}"
+    volumes:
+      - ../../../EasyEmail/deploy/service/base/config:/etc/easy-email
+      - ../../../EasyEmail/deploy/service/base/data:/var/lib/easy-email
+    networks:
+      Easy:
+        aliases:
+          - easy-email-service
+
+  easy-proxy-service:
+    build:
+      context: ../../../EasyProxy
+      dockerfile: deploy/service/base/Dockerfile
+    image: easyproxy/easy-proxy-monorepo-service:local
+    container_name: easy-proxy-monorepo-service
+    restart: unless-stopped
+    ports:
+      - "2323:2323"
+      - "19888:9888"
+      - "24000-24500:24000-24500"
+    volumes:
+      - ../../../EasyProxy/deploy/service/base/config.yaml:/etc/easy-proxy/config.yaml
+      - ../../../EasyProxy/deploy/service/base/data:/var/lib/easy-proxy
+    networks:
+      Easy:
+        aliases:
+          - easy-proxy-service
+
+  python-protocol-manager:
+    <<: *python-protocol-common
+    container_name: python-protocol-manager
+    ports:
+      - "${PYTHON_PROTOCOL_MANAGER_HOST_PORT:-11003}:9100"
+    networks:
+      Easy:
+        aliases:
+          - python-protocol-manager
+
+  easy-protocol-service:
+    build:
+      context: ../../..
+      dockerfile: deploy/service/base/Dockerfile
+    image: easyprotocol/easy-protocol-service:local
+    container_name: easyprotocol-service-base
+    restart: unless-stopped
+    depends_on:
+      - python-protocol-manager
+    ports:
+      - "${EASY_PROTOCOL_GATEWAY_HOST_PORT:-19788}:9788"
+    environment:
+      EASY_PROTOCOL_CONFIG_PATH: /etc/easy-protocol/config.yaml
+      EASY_PROTOCOL_STATE_DIR: /var/lib/easy-protocol
+      EASY_PROTOCOL_RESET_STORE_ON_BOOT: "${EASY_PROTOCOL_RESET_STORE_ON_BOOT:-false}"
+    volumes:
+      - ./generated/easy-protocol.config.yaml:/etc/easy-protocol/config.yaml
+      - ./data/easy-protocol:/var/lib/easy-protocol
+    networks:
+      Easy:
+        aliases:
+          - easy-protocol-service
+
+networks:
+  Easy:
+    name: ${EASY_PROTOCOL_STACK_NETWORK:-EasyAiMi}
+    external: true

@@ -1,0 +1,9 @@
+{
+  "name": "jsprotocol",
+  "private": true,
+  "version": "0.1.0",
+  "description": "JSProtocol skeleton service",
+  "scripts": {
+    "start": "node src/server.js"
+  }
+}

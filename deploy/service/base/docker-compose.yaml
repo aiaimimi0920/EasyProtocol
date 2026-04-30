@@ -1,0 +1,26 @@
+services:
+  easy-protocol-service:
+    build:
+      context: ../../..
+      dockerfile: deploy/service/base/Dockerfile
+    image: ${EASY_PROTOCOL_SERVICE_IMAGE:-easyprotocol/easy-protocol-service:local}
+    container_name: ${EASY_PROTOCOL_SERVICE_CONTAINER_NAME:-easyprotocol-service-base}
+    restart: unless-stopped
+    ports:
+      - "${EASY_PROTOCOL_SERVICE_HOST_PORT:-19788}:9788"
+    environment:
+      EASY_PROTOCOL_CONFIG_PATH: /etc/easy-protocol/config.yaml
+      EASY_PROTOCOL_STATE_DIR: /var/lib/easy-protocol
+      EASY_PROTOCOL_RESET_STORE_ON_BOOT: "${EASY_PROTOCOL_RESET_STORE_ON_BOOT:-false}"
+    volumes:
+      - ${EASY_PROTOCOL_SERVICE_CONFIG_DIR:-./config}:/etc/easy-protocol
+      - ${EASY_PROTOCOL_SERVICE_DATA_DIR:-./data}:/var/lib/easy-protocol
+    networks:
+      easyprotocol_service_network:
+        aliases:
+          - ${EASY_PROTOCOL_SERVICE_NETWORK_ALIAS:-easy-protocol-service}
+
+networks:
+  easyprotocol_service_network:
+    name: EasyAiMi
+    external: true

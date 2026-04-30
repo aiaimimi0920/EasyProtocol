@@ -1,0 +1,233 @@
+name: Publish Service Base GHCR
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'release-*'
+      - 'service-base-*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override release version'
+        required: false
+        default: ''
+      platform:
+        description: 'Docker build platform list'
+        required: false
+        default: 'linux/amd64'
+      run_smoke:
+        description: 'Run smoke check before push'
+        required: false
+        default: true
+        type: boolean
+      push_latest:
+        description: 'Also publish latest'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: easy-protocol-service
+
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v6
+
+      - name: Set Up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Dependencies
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pyyaml
+
+      - name: Prepare Operator Config
+        env:
+          EASYPROTOCOL_SERVICE_UNIFIED_API_PASSWORD: ${{ secrets.EASYPROTOCOL_SERVICE_UNIFIED_API_PASSWORD }}
+          EASYPROTOCOL_SERVICE_CONTROL_PLANE_READ_TOKEN: ${{ secrets.EASYPROTOCOL_SERVICE_CONTROL_PLANE_READ_TOKEN }}
+          EASYPROTOCOL_SERVICE_CONTROL_PLANE_MUTATE_TOKEN: ${{ secrets.EASYPROTOCOL_SERVICE_CONTROL_PLANE_MUTATE_TOKEN }}
+          EASYPROTOCOL_STACK_MAILBOX_SERVICE_API_KEY: ${{ secrets.EASYPROTOCOL_STACK_MAILBOX_SERVICE_API_KEY }}
+          EASYPROTOCOL_STACK_EASY_PROXY_API_KEY: ${{ secrets.EASYPROTOCOL_STACK_EASY_PROXY_API_KEY }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCESS_KEY_ID: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCESS_KEY_ID }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_SECRET_ACCESS_KEY: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_SECRET_ACCESS_KEY }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCOUNT_ID: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ACCOUNT_ID }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_BUCKET: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_BUCKET }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_ENDPOINT_URL: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_ENDPOINT_URL }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_REGION: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_REGION }}
+          EASYPROTOCOL_PROVIDER_REGISTER_R2_PUBLIC_BASE_URL: ${{ secrets.EASYPROTOCOL_PROVIDER_REGISTER_R2_PUBLIC_BASE_URL }}
+          EASYPROTOCOL_PUBLISH_GHCR_REGISTRY: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_REGISTRY }}
+          EASYPROTOCOL_PUBLISH_GHCR_OWNER: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_OWNER }}
+          EASYPROTOCOL_PUBLISH_GHCR_USERNAME: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME }}
+          EASYPROTOCOL_PUBLISH_GHCR_TOKEN: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/materialize-action-config.py \
+            --base-config config.example.yaml \
+            --output config.yaml
+
+      - name: Render Derived Configs
+        shell: pwsh
+        run: ./scripts/render-derived-configs.ps1 -ConfigPath ./config.yaml -ServiceBase
+
+      - name: Resolve Release Metadata
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}"
+          if [[ -z "${version}" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              version="${GITHUB_REF_NAME}"
+            else
+              version="release-$(date -u +%Y%m%d)-$(printf '%03d' "${GITHUB_RUN_NUMBER}")"
+            fi
+          fi
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          owner="${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_OWNER != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_OWNER || github.repository_owner }}"
+          image_ref="${REGISTRY}/${owner}/${IMAGE_NAME}"
+          smoke_image="easyprotocol-smoke:${short_sha}"
+          tags="${image_ref}:${version},${image_ref}:sha-${short_sha}"
+          push_latest="${{ github.event_name == 'workflow_dispatch' && inputs.push_latest || false }}"
+          if [[ "${push_latest}" == "true" || "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            tags="${tags},${image_ref}:latest"
+          fi
+          {
+            echo "version=${version}"
+            echo "short_sha=${short_sha}"
+            echo "image_ref=${image_ref}"
+            echo "smoke_image=${smoke_image}"
+            echo "tags=${tags}"
+            echo "platform=${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'linux/amd64' }}"
+            echo "run_smoke=${{ github.event_name != 'workflow_dispatch' || inputs.run_smoke }}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Validate Release Tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          python scripts/validate-release-tag.py \
+            --mode service-base \
+            --tag "${{ steps.release_meta.outputs.version }}"
+
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Smoke Image
+        if: steps.release_meta.outputs.run_smoke == 'true'
+        shell: bash
+        run: |
+          docker build \
+            -f deploy/service/base/Dockerfile \
+            -t "${{ steps.release_meta.outputs.smoke_image }}" \
+            .
+
+      - name: Run Service Base Smoke Check
+        if: steps.release_meta.outputs.run_smoke == 'true'
+        shell: pwsh
+        run: >
+          ./deploy/service/base/scripts/smoke-easy-protocol-docker-api.ps1
+          -Image "${{ steps.release_meta.outputs.smoke_image }}"
+          -ConfigPath "./deploy/service/base/config/config.yaml"
+
+      - name: Log In To GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_USERNAME || github.actor }}
+          password: ${{ secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN != '' && secrets.EASYPROTOCOL_PUBLISH_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build And Push Service Base Image
+        id: build_push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/service/base/Dockerfile
+          push: true
+          provenance: mode=max
+          sbom: true
+          platforms: ${{ steps.release_meta.outputs.platform }}
+          tags: ${{ steps.release_meta.outputs.tags }}
+          cache-from: type=gha,scope=service-base-ghcr
+          cache-to: type=gha,mode=max,scope=service-base-ghcr
+
+      - name: Write Release Manifest
+        id: manifest
+        shell: pwsh
+        run: |
+          $tags = '${{ steps.release_meta.outputs.tags }}'.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+          $manifest = [ordered]@{
+            release = [ordered]@{
+              kind = 'service-base-ghcr'
+              version = '${{ steps.release_meta.outputs.version }}'
+              imageRef = '${{ steps.release_meta.outputs.image_ref }}'
+              platform = '${{ steps.release_meta.outputs.platform }}'
+              digest = '${{ steps.build_push.outputs.digest }}'
+              tags = $tags
+              commit = '${{ github.sha }}'
+              actor = '${{ github.actor }}'
+              runSmoke = ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true')
+            }
+          }
+          $manifestPath = Join-Path $PWD 'service-base-release-manifest.json'
+          $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+          "path=$manifestPath" >> $env:GITHUB_OUTPUT
+
+      - name: Write Release Notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tags = '${{ steps.release_meta.outputs.tags }}'.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)
+          $lines = @(
+            '## EasyProtocol Service Base GHCR'
+            ''
+            ('- Version: `${{ steps.release_meta.outputs.version }}`')
+            ('- Image: `${{ steps.release_meta.outputs.image_ref }}`')
+            ('- Digest: `${{ steps.build_push.outputs.digest }}`')
+            ('- Commit: `${{ github.sha }}`')
+            ('- Smoke: ' + ($(if ('${{ steps.release_meta.outputs.run_smoke }}' -eq 'true') { 'passed' } else { 'skipped' })))
+            ''
+            '### Tags'
+          )
+          $lines += ($tags | ForEach-Object { '- `' + $_ + '`' })
+          $notesPath = Join-Path $PWD 'service-base-release-notes.md'
+          $lines | Set-Content -LiteralPath $notesPath -Encoding UTF8
+          "path=$notesPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Release Manifest
+        uses: actions/upload-artifact@v6
+        with:
+          name: service-base-release-manifest
+          path: ${{ steps.manifest.outputs.path }}
+
+      - name: Upload Release Notes
+        uses: actions/upload-artifact@v6
+        with:
+          name: service-base-release-notes
+          path: ${{ steps.notes.outputs.path }}
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_meta.outputs.version }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: |
+            ${{ steps.manifest.outputs.path }}
+            ${{ steps.notes.outputs.path }}
+
+      - name: Write Release Summary
+        shell: bash
+        run: |
+          cat "${{ steps.notes.outputs.path }}" >> "${GITHUB_STEP_SUMMARY}"
+

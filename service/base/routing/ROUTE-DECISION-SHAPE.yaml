@@ -1,0 +1,11 @@
+kind: route_decision
+version: draft
+requestId: ""
+requestMode: ""
+strategyMode: ""
+requestedLanguage: ""
+selectedService: ""
+selectionMode: ""
+reason: ""
+normalizedOperation: ""
+cooldownApplied: false

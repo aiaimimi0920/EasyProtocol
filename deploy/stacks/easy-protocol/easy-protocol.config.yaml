@@ -1,0 +1,117 @@
+mode: strategy
+
+log_level: info
+
+unified_api:
+  listen: 0.0.0.0:9788
+  password: "123456"
+
+control_plane:
+  enabled: true
+  read_token: "123456"
+  mutate_token: "123456"
+  require_actor: true
+  localhost_only: false
+  allowlist: []
+  token_grace_period: 15m
+
+strategy:
+  mode: balance
+  failure_threshold: 10
+  cooldown_duration: 30m
+  fallback_on_retryable_errors: true
+  max_fallback_attempts: 10
+  retryable_categories:
+    - transport_error
+    - delegation_error
+    - timeout_error
+    - service_unavailable
+    - unsupported_operation
+  operation_policies:
+    codex.semantic.step:
+      fallback_mode: enabled
+      max_fallback_attempts: 10
+      retryable_categories:
+        - transport_error
+        - delegation_error
+        - timeout_error
+        - service_unavailable
+        - unsupported_operation
+
+error_attribution:
+  enabled: true
+
+tracing:
+  enabled: true
+  history_limit: 200
+
+persistence:
+  enabled: true
+  runtime_state_path: /var/lib/easy-protocol/runtime-overrides.json
+  control_plane_state_path: /var/lib/easy-protocol/control-plane-state.json
+  audit_log_path: /var/lib/easy-protocol/audit-log.jsonl
+  snapshot_dir: /var/lib/easy-protocol/runtime-snapshots
+  audit_history_limit: 500
+  snapshot_limit: 200
+
+services:
+  - name: PythonProtocol-01
+    language: python
+    endpoint: http://python-protocol-service-01:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-02
+    language: python
+    endpoint: http://python-protocol-service-02:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-03
+    language: python
+    endpoint: http://python-protocol-service-03:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-04
+    language: python
+    endpoint: http://python-protocol-service-04:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-05
+    language: python
+    endpoint: http://python-protocol-service-05:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-06
+    language: python
+    endpoint: http://python-protocol-service-06:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-07
+    language: python
+    endpoint: http://python-protocol-service-07:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-08
+    language: python
+    endpoint: http://python-protocol-service-08:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-09
+    language: python
+    endpoint: http://python-protocol-service-09:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step
+  - name: PythonProtocol-10
+    language: python
+    endpoint: http://python-protocol-service-10:9100
+    enabled: true
+    supported_operations:
+      - codex.semantic.step

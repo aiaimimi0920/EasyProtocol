@@ -1,0 +1,173 @@
+# EasyProtocol operator config
+#
+# Copy this file to `config.yaml` and edit only the root file. Derived gateway
+# and stack-local config files should be rendered from this root config by
+# scripts under `scripts/`.
+
+serviceBase:
+  context: .
+  dockerfile: deploy/service/base/Dockerfile
+  image: easyprotocol/easy-protocol-service:local
+  runtime:
+    mode: strategy
+    log_level: info
+    unified_api:
+      listen: 0.0.0.0:9788
+      password: change-me
+    control_plane:
+      enabled: true
+      read_token: change-me
+      mutate_token: change-me
+      require_actor: true
+      localhost_only: false
+      allowlist: []
+      token_grace_period: 15m
+    strategy:
+      mode: balance
+      failure_threshold: 10
+      cooldown_duration: 30m
+      fallback_on_retryable_errors: true
+      max_fallback_attempts: 10
+      retryable_categories:
+        - transport_error
+        - delegation_error
+        - timeout_error
+        - service_unavailable
+        - unsupported_operation
+      operation_policies:
+        codex.semantic.step:
+          fallback_mode: enabled
+          max_fallback_attempts: 10
+          retryable_categories:
+            - transport_error
+            - delegation_error
+            - timeout_error
+            - service_unavailable
+            - unsupported_operation
+    error_attribution:
+      enabled: true
+    tracing:
+      enabled: true
+      history_limit: 200
+    persistence:
+      enabled: true
+      runtime_state_path: /var/lib/easy-protocol/runtime-overrides.json
+      control_plane_state_path: /var/lib/easy-protocol/control-plane-state.json
+      audit_log_path: /var/lib/easy-protocol/audit-log.jsonl
+      snapshot_dir: /var/lib/easy-protocol/runtime-snapshots
+      audit_history_limit: 500
+      snapshot_limit: 200
+
+providers:
+  python:
+    image: easyprotocol/python-protocol-service:local
+    dockerfile: deploy/providers/python/Dockerfile
+    registry:
+      enabled: true
+      name: PythonProtocol
+      language: python
+      endpointHost: python-protocol-manager
+      port: 9100
+      supportedOperations:
+        - codex.semantic.step
+    containerEnvironment:
+      PYTHONUNBUFFERED: "1"
+      PYTHON_PROTOCOL_HOST: 0.0.0.0
+      PYTHON_PROTOCOL_PORT: "9100"
+      PYTHON_PROTOCOL_MIN_WARM_WORKERS: "1"
+      PYTHON_PROTOCOL_MAX_WORKERS: "6"
+      PYTHON_PROTOCOL_IDLE_TIMEOUT_SECONDS: "600"
+      PYTHON_PROTOCOL_TASK_TIMEOUT_SECONDS: "1800"
+      PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS: "60"
+      PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER: "50"
+      PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS: "5"
+      MAILBOX_SERVICE_BASE_URL: http://easy-email-service:8080
+      MAILBOX_SERVICE_API_KEY: ""
+      MAILBOX_SERVICE_REQUEST_ATTEMPTS: "8"
+      EASY_PROXY_BASE_URL: http://easy-proxy-service:9888
+      EASY_PROXY_API_KEY: ""
+      REGISTER_ENABLE_EASY_PROXY: "true"
+      REGISTER_REQUIRE_EASY_PROXY: "true"
+      REGISTER_TEAM_AUTH_DIR: /shared/team-auth
+      REGISTER_TEAM_AUTH_GLOB: "*-team.json"
+      REGISTER_TEAM_CAPACITY_LIMIT: "9"
+      REGISTER_TEAM_INVITE_SWEEP_AGE_SECONDS: "180"
+      REGISTER_FREE_MANUAL_OAUTH_PRESERVE_ENABLED: "false"
+      REGISTER_R2_ACCESS_KEY_ID: ""
+      REGISTER_R2_SECRET_ACCESS_KEY: ""
+      REGISTER_R2_ACCOUNT_ID: ""
+      REGISTER_R2_BUCKET: ""
+      REGISTER_R2_ENDPOINT_URL: ""
+      REGISTER_R2_REGION: auto
+      REGISTER_R2_PUBLIC_BASE_URL: ""
+    hostMounts:
+      registerOutputDirHost: C:/EasyProtocol/register-output
+      registerTeamAuthDirHost: C:/EasyProtocol/team-auth
+      registerTeamLocalDirHost: C:/Users/Public/.cli-proxy-api/team
+
+  go:
+    image: easyprotocol/golang-protocol-service:local
+    dockerfile: deploy/providers/go/Dockerfile
+    registry:
+      enabled: true
+      name: GolangProtocol
+      language: go
+      endpointHost: golang-protocol-service
+      port: 9100
+      supportedOperations: []
+    containerEnvironment:
+      GOLANG_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+
+  javascript:
+    image: easyprotocol/js-protocol-service:local
+    dockerfile: deploy/providers/javascript/Dockerfile
+    registry:
+      enabled: true
+      name: JSProtocol
+      language: javascript
+      endpointHost: js-protocol-service
+      port: 9100
+      supportedOperations: []
+    containerEnvironment:
+      JS_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+
+  rust:
+    image: easyprotocol/rust-protocol-service:local
+    dockerfile: deploy/providers/rust/Dockerfile
+    registry:
+      enabled: true
+      name: RustProtocol
+      language: rust
+      endpointHost: rust-protocol-service
+      port: 9100
+      supportedOperations: []
+    containerEnvironment:
+      RUST_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+
+stack:
+  easyProtocol:
+    networkName: EasyAiMi
+    gatewayConfigOutputPath: deploy/stacks/easy-protocol/generated/easy-protocol.config.yaml
+    envOutputPath: deploy/stacks/easy-protocol/generated/stack.env
+    easyProtocol:
+      publishedPort: 19788
+      resetStoreOnBoot: false
+    pythonManagerPublishedPort: 11003
+    externalDependencies:
+      easyEmail:
+        enabled: true
+        baseUrl: http://easy-email-service:8080
+        apiKey: ""
+        resetStoreOnBoot: false
+        m2uEasyProxyMaxAttempts: 10
+      easyProxy:
+        enabled: true
+        baseUrl: http://easy-proxy-service:9888
+        apiKey: ""
+
+publishing:
+  ghcr:
+    registry: ghcr.io
+    owner: ""
+    username: ""
+    token: ""

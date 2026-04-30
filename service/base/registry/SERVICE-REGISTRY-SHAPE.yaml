@@ -1,0 +1,27 @@
+kind: language_service_registry
+version: draft
+services:
+  - name: GolangProtocol
+    language: go
+    enabled: true
+    supportedOperations: []
+    supportedProtocolVersions: []
+    cooled: false
+  - name: JSProtocol
+    language: javascript
+    enabled: true
+    supportedOperations: []
+    supportedProtocolVersions: []
+    cooled: false
+  - name: PythonProtocol
+    language: python
+    enabled: true
+    supportedOperations: []
+    supportedProtocolVersions: []
+    cooled: false
+  - name: RustProtocol
+    language: rust
+    enabled: true
+    supportedOperations: []
+    supportedProtocolVersions: []
+    cooled: false

@@ -1,0 +1,70 @@
+mode: strategy
+log_level: info
+unified_api:
+  listen: 0.0.0.0:9788
+  password: change-me
+control_plane:
+  enabled: true
+  read_token: change-me
+  mutate_token: change-me
+  require_actor: true
+  localhost_only: false
+  allowlist: []
+  token_grace_period: 15m
+strategy:
+  mode: balance
+  failure_threshold: 10
+  cooldown_duration: 30m
+  fallback_on_retryable_errors: true
+  max_fallback_attempts: 10
+  retryable_categories:
+  - transport_error
+  - delegation_error
+  - timeout_error
+  - service_unavailable
+  - unsupported_operation
+  operation_policies:
+    codex.semantic.step:
+      fallback_mode: enabled
+      max_fallback_attempts: 10
+      retryable_categories:
+      - transport_error
+      - delegation_error
+      - timeout_error
+      - service_unavailable
+      - unsupported_operation
+error_attribution:
+  enabled: true
+tracing:
+  enabled: true
+  history_limit: 200
+persistence:
+  enabled: true
+  runtime_state_path: /var/lib/easy-protocol/runtime-overrides.json
+  control_plane_state_path: /var/lib/easy-protocol/control-plane-state.json
+  audit_log_path: /var/lib/easy-protocol/audit-log.jsonl
+  snapshot_dir: /var/lib/easy-protocol/runtime-snapshots
+  audit_history_limit: 500
+  snapshot_limit: 200
+services:
+- name: PythonProtocol
+  language: python
+  endpoint: http://python-protocol-manager:9100
+  enabled: true
+  supported_operations:
+  - codex.semantic.step
+- name: GolangProtocol
+  language: go
+  endpoint: http://golang-protocol-service:9100
+  enabled: true
+  supported_operations: []
+- name: JSProtocol
+  language: javascript
+  endpoint: http://js-protocol-service:9100
+  enabled: true
+  supported_operations: []
+- name: RustProtocol
+  language: rust
+  endpoint: http://rust-protocol-service:9100
+  enabled: true
+  supported_operations: []
