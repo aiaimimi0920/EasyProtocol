@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from new_protocol_register.easyprotocol_flow import _update_team_expand_progress_payload  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
+from new_protocol_register import protocol_chatgpt_login  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.protocol_small_success import (  # noqa: E402
     PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV,
@@ -165,6 +166,25 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("browser_native", str((winning_attempt or {}).get("variant") or ""))
         self.assertTrue(any(str(item.get("variant") or "") == "browser_native" for item in attempt_history))
         browser_fallback.assert_called_once()
+
+    def test_chatgpt_login_request_retries_transient_network_error(self) -> None:
+        session = mock.Mock()
+        response = SimpleNamespace(status_code=200, url="https://chatgpt.com/auth/login_with")
+        with mock.patch.object(
+            protocol_chatgpt_login,
+            "_session_request",
+            side_effect=[RuntimeError("curl: (7) Connection closed abruptly"), response],
+        ) as session_request:
+            result = protocol_chatgpt_login._chatgpt_login_request(
+                session,
+                "GET",
+                "https://chatgpt.com/auth/login_with",
+                explicit_proxy="http://proxy:8080",
+                request_label="chatgpt-login",
+                timeout=20,
+            )
+        self.assertIs(result, response)
+        self.assertEqual(2, session_request.call_count)
 
 
 if __name__ == "__main__":

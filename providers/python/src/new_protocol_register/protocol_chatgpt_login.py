@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import uuid
 from pathlib import Path
@@ -67,6 +68,62 @@ from protocol_runtime.protocol_register import (
     _verify_login_password,
     temporary_workspace_selector_overrides,
 )
+
+
+def _chatgpt_login_network_error_is_retryable(exc: BaseException) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    retry_markers = (
+        "connection closed abruptly",
+        "handshake operation timed out",
+        "proxy connect aborted",
+        "proxy connect failed",
+        "operation timed out",
+        "recv failure",
+        "connection reset by peer",
+        "curl: (56)",
+        "curl: (35)",
+        "curl: (28)",
+        "curl: (7)",
+        "urlopen error",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+def _chatgpt_login_request(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    explicit_proxy: str | None,
+    request_label: str,
+    **kwargs: Any,
+) -> Any:
+    last_exc: BaseException | None = None
+    for attempt in range(1, 3):
+        try:
+            return _session_request(
+                session,
+                method,
+                url,
+                explicit_proxy=explicit_proxy,
+                request_label=request_label,
+                **kwargs,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= 2 or not _chatgpt_login_network_error_is_retryable(exc):
+                raise
+            print(
+                "[protocol-chatgpt-login] retrying transient request "
+                f"label={request_label} attempt={attempt} err={exc}",
+                flush=True,
+            )
+            time.sleep(min(1.0, 0.3 * attempt))
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"chatgpt_login_request_failed label={request_label}")
 
 
 def _normalize_seed_login_context(
@@ -160,7 +217,7 @@ def _complete_chatgpt_nextauth_callback(
     callback_url: str,
     explicit_proxy: str | None,
 ) -> Any:
-    response = _session_request(
+    response = _chatgpt_login_request(
         session,
         "GET",
         callback_url,
@@ -194,7 +251,7 @@ def _bootstrap_chatgpt_login_with_redirect(
     device_id: str,
     explicit_proxy: str | None,
 ) -> str:
-    login_response = _session_request(
+    login_response = _chatgpt_login_request(
         session,
         "GET",
         CHATGPT_LOGIN_URL,
@@ -214,7 +271,7 @@ def _bootstrap_chatgpt_login_with_redirect(
             category="flow_error",
         )
 
-    csrf_response = _session_request(
+    csrf_response = _chatgpt_login_request(
         session,
         "GET",
         CHATGPT_NEXTAUTH_CSRF_URL,
@@ -257,7 +314,7 @@ def _bootstrap_chatgpt_login_with_redirect(
             "auth_session_logging_id": auth_session_logging_id,
         }
     )
-    signin_response = _session_request(
+    signin_response = _chatgpt_login_request(
         session,
         "POST",
         f"{CHATGPT_NEXTAUTH_SIGNIN_OPENAI_URL}?{signin_query}",
@@ -422,7 +479,7 @@ def run_protocol_chatgpt_login_init_from_path(
                 device_id=device_id,
                 explicit_proxy=explicit_proxy,
             )
-            authorize_init_response = _session_request(
+            authorize_init_response = _chatgpt_login_request(
                 session,
                 "GET",
                 auth_url,
@@ -452,7 +509,7 @@ def run_protocol_chatgpt_login_init_from_path(
                 sentinel_context=sentinel_context,
             )
             authorize_continue_headers["oai-device-id"] = device_id
-            continue_response = _session_request(
+            continue_response = _chatgpt_login_request(
                 session,
                 "POST",
                 AUTHORIZE_CONTINUE_URL,
@@ -518,7 +575,7 @@ def run_protocol_chatgpt_login_init_from_path(
                     sentinel_context=sentinel_context,
                 )
                 otp_validate_headers["oai-device-id"] = device_id
-                oauth_entry_response = _session_request(
+                oauth_entry_response = _chatgpt_login_request(
                     session,
                     "POST",
                     EMAIL_OTP_VALIDATE_URL,
