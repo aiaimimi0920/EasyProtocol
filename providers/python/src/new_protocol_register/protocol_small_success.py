@@ -82,6 +82,7 @@ from protocol_runtime.protocol_register import (
     _response_preview,
     _send_email_otp,
     _session_request,
+    _submit_browser_native_signup_user_register,
 )
 from protocol_runtime.register_inputs import generate_name, generate_pwd
 
@@ -481,6 +482,100 @@ def _login_session_cookie(session: requests.Session) -> str:
         "login_session",
         preferred_domains=(".openai.com", "auth.openai.com"),
     )
+
+
+def _platform_auth0_authorize_response_needs_retry(response: Any) -> bool:
+    try:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+    except Exception:
+        status_code = 0
+    return bool(
+        status_code == 403
+        or _response_has_cloudflare_challenge(response)
+        or _response_error_code(response).lower() == "invalid_state"
+    )
+
+
+def _submit_platform_auth0_authorize_with_retry(
+    *,
+    session: requests.Session,
+    auth_url: str,
+    sentinel_context: Any,
+    explicit_proxy: str | None,
+) -> tuple[Any, Any]:
+    response = _session_request(
+        session,
+        "GET",
+        auth_url,
+        explicit_proxy=explicit_proxy,
+        request_label="platform-authorize-init",
+        timeout=20,
+        headers={
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "accept-language": _PLATFORM_AUTH0_ACCEPT_LANGUAGE,
+            "upgrade-insecure-requests": "1",
+            "user-agent": str(session.headers.get("user-agent") or DEFAULT_PROTOCOL_USER_AGENT),
+            "sec-ch-ua": _PLATFORM_AUTH0_SEC_CH_UA,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-site",
+        },
+    )
+    login_session = _login_session_cookie(session)
+    needs_retry = (not login_session) or _platform_auth0_authorize_response_needs_retry(response)
+    if needs_retry:
+        print(
+            "[protocol-small-success] platform authorize retry "
+            f"status={getattr(response, 'status_code', 0)} "
+            f"login_session={'yes' if login_session else 'no'} "
+            f"error_code={_response_error_code(response) or '<none>'} "
+            f"challenge={'yes' if _response_has_cloudflare_challenge(response) else 'no'}",
+            flush=True,
+        )
+        sentinel_context, browser_result = _maybe_prime_protocol_auth_session_with_browser(
+            session,
+            sentinel_context=sentinel_context,
+            explicit_proxy=explicit_proxy,
+            reason="platform_authorize_init",
+        )
+        if browser_result is not None:
+            response = _session_request(
+                session,
+                "GET",
+                auth_url,
+                explicit_proxy=explicit_proxy,
+                request_label="platform-authorize-init-retry",
+                timeout=20,
+                headers={
+                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "accept-language": _PLATFORM_AUTH0_ACCEPT_LANGUAGE,
+                    "upgrade-insecure-requests": "1",
+                    "user-agent": str(session.headers.get("user-agent") or DEFAULT_PROTOCOL_USER_AGENT),
+                    "sec-ch-ua": _PLATFORM_AUTH0_SEC_CH_UA,
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": "\"Windows\"",
+                    "sec-fetch-dest": "document",
+                    "sec-fetch-mode": "navigate",
+                    "sec-fetch-site": "same-site",
+                },
+            )
+            login_session = _login_session_cookie(session)
+    if not login_session:
+        raise ProtocolRuntimeError(
+            "authorize_init_missing_login_session",
+            stage="stage_auth_continue",
+            detail="oauth_authorize",
+            category="auth_error",
+        )
+    _raise_if_unexpected_http(
+        response,
+        expected_statuses={200, 302},
+        stage="stage_auth_continue",
+        detail="oauth_authorize",
+    )
+    return sentinel_context, response
 
 
 def _openai_login_init_error_is_retryable(exc: BaseException) -> bool:
@@ -1281,6 +1376,44 @@ def _submit_user_register_protocol(
             f"body={_response_preview(response, 220)}",
             flush=True,
         )
+    if sentinel_candidates:
+        browser_sentinel_label, browser_sentinel_header = sentinel_candidates[0]
+        browser_t_len, browser_p_len, browser_has_c = _sentinel_token_lengths(browser_sentinel_header)
+        browser_response = _submit_browser_native_signup_user_register(
+            session=session,
+            explicit_proxy=explicit_proxy,
+            email=email,
+            password=password,
+            sentinel_token=browser_sentinel_header,
+            passkey_capabilities_header=passkey_false_header,
+            sentinel_context=sentinel_context,
+        )
+        if browser_response is not None:
+            status_code = int(getattr(browser_response, "status_code", 0) or 0)
+            browser_attempt = {
+                "networkAttempt": int(network_attempt),
+                "candidateIndex": int(len(ordered_attempts) + 1),
+                "sentinelLabel": str(browser_sentinel_label or ""),
+                "variant": "browser_native",
+                "tLen": int(browser_t_len),
+                "pLen": int(browser_p_len),
+                "hasC": bool(browser_has_c),
+                "cookieHeaderLen": 0,
+                "passkey": True,
+                "cookieSummary": _protocol_auth_cookie_summary(session),
+                "statusCode": status_code,
+            }
+            if attempt_history is not None:
+                attempt_history.append(dict(browser_attempt))
+            last_response = browser_response
+            if status_code < 400:
+                return browser_response, dict(browser_attempt)
+            print(
+                "[protocol-small-success] user_register browser fallback failed "
+                f"sentinel={browser_sentinel_label} status={status_code} "
+                f"body={_response_preview(browser_response, 220)}",
+                flush=True,
+            )
     return last_response, winning_attempt
 
 
@@ -1440,43 +1573,11 @@ def run_protocol_small_success_once(
                             except Exception:
                                 pass
                             _remaining_flow_seconds()
-                            authorize_response = _session_request(
-                                session,
-                                "GET",
-                                auth_url,
+                            sentinel_context, authorize_response = _submit_platform_auth0_authorize_with_retry(
+                                session=session,
+                                auth_url=auth_url,
+                                sentinel_context=sentinel_context,
                                 explicit_proxy=explicit_proxy,
-                                request_label=f"protocol-small-success-authorize-{network_attempt}",
-                                timeout=20,
-                                headers={
-                                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                                    "accept-language": _PLATFORM_AUTH0_ACCEPT_LANGUAGE,
-                                    "upgrade-insecure-requests": "1",
-                                    "user-agent": DEFAULT_PROTOCOL_USER_AGENT,
-                                    "sec-ch-ua": _PLATFORM_AUTH0_SEC_CH_UA,
-                                    "sec-ch-ua-mobile": "?0",
-                                    "sec-ch-ua-platform": "\"Windows\"",
-                                    "sec-fetch-dest": "document",
-                                    "sec-fetch-mode": "navigate",
-                                    "sec-fetch-site": "same-site",
-                                },
-                            )
-                            login_session = _get_session_cookie(
-                                session,
-                                "login_session",
-                                preferred_domains=(".openai.com", "auth.openai.com"),
-                            )
-                            if not login_session:
-                                raise ProtocolRuntimeError(
-                                    "authorize_init_missing_login_session",
-                                    stage="stage_auth_continue",
-                                    detail="oauth_authorize",
-                                    category="auth_error",
-                                )
-                            _raise_if_unexpected_http(
-                                authorize_response,
-                                expected_statuses={200, 302},
-                                stage="stage_auth_continue",
-                                detail="oauth_authorize",
                             )
 
                             auth_session_payload = _decode_current_auth_session_payload(session)
