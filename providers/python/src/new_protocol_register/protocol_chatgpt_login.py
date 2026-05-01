@@ -747,6 +747,7 @@ def run_protocol_chatgpt_login_init_from_path(
                     "planType": bootstrap_plan_type,
                     "structure": bootstrap_structure,
                     "accessTokenPresent": bool(bootstrap_access_token),
+                    "accessToken": bootstrap_access_token,
                     "userId": str(bootstrap_user.get("id") or "").strip(),
                     "email": str(bootstrap_user.get("email") or "").strip(),
                 },

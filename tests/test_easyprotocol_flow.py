@@ -189,6 +189,20 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(2, session_request.call_count)
 
+    def test_extract_chatgpt_client_bootstrap_reads_access_token(self) -> None:
+        html = """
+        <html>
+          <body>
+            <script id="client-bootstrap" type="application/json">
+              {"authStatus":"logged_in","session":{"accessToken":"tok_demo","account":{"id":"acct_1","planType":"free","structure":"personal"},"user":{"id":"user_1","email":"demo@example.com"}}}
+            </script>
+          </body>
+        </html>
+        """
+        payload = protocol_chatgpt_login._extract_chatgpt_client_bootstrap(html)
+        self.assertEqual("logged_in", payload.get("authStatus"))
+        self.assertEqual("tok_demo", (payload.get("session") or {}).get("accessToken"))
+
     def test_obtain_team_mother_oauth_force_email_auth_skips_refresh(self) -> None:
         with mock.patch.object(
             easyprotocol_flow,
