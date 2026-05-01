@@ -41,6 +41,12 @@ jobs:
       - name: Check Out Repository
         uses: actions/checkout@v6
 
+      - name: Check Out EasyBrowser Runtime Source
+        uses: actions/checkout@v6
+        with:
+          repository: aiaimimi0920/EasyBrowser
+          path: EasyBrowser
+
       - name: Set Up Python
         uses: actions/setup-python@v6
         with:

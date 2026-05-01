@@ -22,6 +22,33 @@ if ($null -eq $providerConfig) {
     throw "Missing providers.$Provider section in config.yaml."
 }
 
+function Resolve-EasyBrowserRepoRoot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $explicitCandidates = @(
+        [string]$env:EASYBROWSER_REPO_ROOT
+    )
+    $defaultCandidates = @(
+        (Join-Path (Split-Path -Parent $RepoRoot) 'EasyBrowser'),
+        (Join-Path $RepoRoot 'EasyBrowser')
+    )
+
+    foreach ($candidate in @($explicitCandidates + $defaultCandidates)) {
+        $normalized = [string]$candidate
+        if ([string]::IsNullOrWhiteSpace($normalized)) {
+            continue
+        }
+        if (Test-Path -LiteralPath $normalized) {
+            return $normalized
+        }
+    }
+
+    return ''
+}
+
 $repoRoot = Get-EasyProtocolRepoRoot
 $dockerfileRelative = if ($providerConfig.dockerfile) { [string]$providerConfig.dockerfile } else { "deploy/providers/$Provider/Dockerfile" }
 $configuredImage = if ($providerConfig.image) { [string]$providerConfig.image } else { "easyprotocol/${Provider}-protocol-service:local" }
@@ -30,8 +57,10 @@ $imageRef = if ([string]::IsNullOrWhiteSpace($Image)) { $configuredImage } else 
 
 Write-Host "Building provider image [$Provider]: $imageRef" -ForegroundColor Cyan
 if ($Provider -eq 'python') {
-    $gameEditorRoot = Split-Path -Parent $repoRoot
-    $browserRepoRoot = Join-Path $gameEditorRoot 'EasyBrowser'
+    $browserRepoRoot = Resolve-EasyBrowserRepoRoot -RepoRoot $repoRoot
+    if ([string]::IsNullOrWhiteSpace($browserRepoRoot)) {
+        throw "Missing EasyBrowser repo root. Set EASYBROWSER_REPO_ROOT or provide EasyBrowser next to EasyProtocol."
+    }
     $browserRuntimeSrc = Join-Path $browserRepoRoot 'runtimes\chrome\src'
     $browserRequirementsPath = Join-Path $browserRepoRoot 'runtimes\chrome\requirements.txt'
     $browserSharedAuthSrc = Join-Path $browserRuntimeSrc 'shared_auth'
