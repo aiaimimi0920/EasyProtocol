@@ -860,6 +860,8 @@ def _resolve_weighted_primary_mailbox_provider(providers: list[str]) -> str:
 
 def _provider_from_mailbox_ref(mailbox_ref: str) -> str:
     value = str(mailbox_ref or "").strip()
+    if not value:
+        return ""
     if ":" not in value:
         return "moemail"
     provider = value.split(":", 1)[0]
@@ -878,11 +880,27 @@ def _normalize_requested_email_address(value: str | None) -> str:
     return f"{local_part}@{domain}"
 
 
-def _requested_email_provider_candidates(preallocated_mailbox_ref: str | None) -> tuple[str, ...]:
+def _preferred_provider_from_requested_email(preallocated_email: str | None) -> str:
+    normalized_email = _normalize_requested_email_address(preallocated_email)
+    if not normalized_email:
+        return ""
+    _, _, domain = normalized_email.partition("@")
+    if domain == "mail.aiaimimi.com":
+        return "cloudflare_temp_email"
+    return ""
+
+
+def _requested_email_provider_candidates(
+    preallocated_mailbox_ref: str | None,
+    preallocated_email: str | None = None,
+) -> tuple[str, ...]:
     ordered: list[str] = []
-    preferred = _provider_from_mailbox_ref(preallocated_mailbox_ref or "")
-    if preferred:
-        ordered.append(preferred)
+    preferred_from_email = _preferred_provider_from_requested_email(preallocated_email)
+    if preferred_from_email:
+        ordered.append(preferred_from_email)
+    preferred_from_ref = _provider_from_mailbox_ref(preallocated_mailbox_ref or "")
+    if preferred_from_ref and preferred_from_ref not in ordered:
+        ordered.append(preferred_from_ref)
     for provider in resolve_mailbox_provider_order():
         if provider not in ordered:
             ordered.append(provider)
@@ -890,7 +908,7 @@ def _requested_email_provider_candidates(preallocated_mailbox_ref: str | None) -
 
 
 def _provider_supports_explicit_same_address_recreate(provider: str) -> bool:
-    return _normalize_mailbox_provider(provider) in {"moemail"}
+    return _normalize_mailbox_provider(provider) in {"moemail", "cloudflare_temp_email"}
 
 
 def resolve_mailbox(
@@ -906,7 +924,10 @@ def resolve_mailbox(
         errors: list[str] = []
         ttl_seconds = _resolve_mailbox_ttl_seconds()
         requested_local_part, _, requested_domain = normalized_preallocated_email.partition("@")
-        for provider in _requested_email_provider_candidates(preallocated_mailbox_ref):
+        for provider in _requested_email_provider_candidates(
+            preallocated_mailbox_ref,
+            normalized_preallocated_email,
+        ):
             try:
                 recovery = recover_mailbox_by_email(
                     email_address=normalized_preallocated_email,

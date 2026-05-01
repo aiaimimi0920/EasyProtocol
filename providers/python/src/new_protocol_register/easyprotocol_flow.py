@@ -495,6 +495,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
         source_payload = load_json_payload(source_path)
         explicit_proxy = str(step_input.get("proxy_url") or "").strip() or None
         workspace_selector = str(step_input.get("workspace_selector") or "").strip() or None
+        force_email_auth = str(step_input.get("force_email_auth") or "").strip().lower() in {"1", "true", "yes", "on"}
         seed_access_token = str(source_payload.get("access_token") or source_payload.get("token") or "").strip()
         seed_password = str(source_payload.get("password") or "").strip()
         seed_refresh_token = str(source_payload.get("refresh_token") or "").strip()
@@ -502,7 +503,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
         token_validation_error: Exception | None = None
         result: dict[str, Any] | None = None
 
-        if has_complete_oauth_token:
+        if has_complete_oauth_token and not force_email_auth:
             try:
                 refresh_result = refresh_team_auth_once(
                     team_auth_path=source_path,
@@ -521,7 +522,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
             except Exception as exc:
                 token_validation_error = exc
 
-        if result is None and seed_password:
+        if result is None and (seed_password or force_email_auth):
             oauth_result = run_protocol_oauth_from_path(
                 seed_path=source_path,
                 output_dir=str(step_input.get("output_dir") or "").strip() or None,
@@ -536,6 +537,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
                 storage_path=oauth_result.storage_path,
             )
             result["authMode"] = "email"
+            result["refreshOnly"] = False
 
         if result is None:
             if token_validation_error is not None:

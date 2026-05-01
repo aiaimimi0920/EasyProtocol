@@ -66,6 +66,7 @@ USER_REGISTER_URL = f"{AUTH_BASE}/api/accounts/user/register"
 PASSWORD_VERIFY_URL = f"{AUTH_BASE}/api/accounts/password/verify"
 EMAIL_OTP_SEND_URL = f"{AUTH_BASE}/api/accounts/email-otp/send"
 EMAIL_OTP_VALIDATE_URL = f"{AUTH_BASE}/api/accounts/email-otp/validate"
+PASSWORDLESS_SEND_OTP_URL = f"{AUTH_BASE}/api/accounts/passwordless/send-otp"
 CREATE_ACCOUNT_URL = f"{AUTH_BASE}/api/accounts/create_account"
 WORKSPACE_SELECT_URL = f"{AUTH_BASE}/api/accounts/workspace/select"
 CLIENT_AUTH_SESSION_DUMP_URL = f"{AUTH_BASE}/api/accounts/client_auth_session_dump"
@@ -5788,7 +5789,8 @@ def _send_email_otp(
     *,
     explicit_proxy: str | None,
     header_builder: ProtocolSentinelContext | None = None,
-) -> None:
+    referer: str = EMAIL_VERIFICATION_REFERER,
+) -> Any:
     if not env_flag(PROTOCOL_ENABLE_EMAIL_OTP_SEND_ENV, True):
         print(
             "[python-protocol-service] email OTP request skipped "
@@ -5799,7 +5801,7 @@ def _send_email_otp(
     print("[python-protocol-service] requesting email OTP")
     req_headers = _build_protocol_headers(
         request_kind="email-otp-send",
-        referer=EMAIL_VERIFICATION_REFERER,
+        referer=referer,
         content_type=None,
         sentinel_context=header_builder,
     )
@@ -5820,6 +5822,39 @@ def _send_email_otp(
         "[python-protocol-service] email OTP requested "
         f"status={response.status_code} page_type={_extract_page_type(response) or 'unknown'}"
     )
+    return response
+
+
+def _send_passwordless_login_otp(
+    session: requests.Session,
+    *,
+    explicit_proxy: str | None,
+    header_builder: ProtocolSentinelContext | None = None,
+) -> Any:
+    print("[python-protocol-service] requesting passwordless login OTP from login page")
+    req_headers = _build_protocol_headers(
+        request_kind="",
+        referer=LOGIN_PASSWORD_REFERER,
+        sentinel_context=header_builder,
+    )
+
+    response = _session_request(
+        session,
+        "POST",
+        PASSWORDLESS_SEND_OTP_URL,
+        explicit_proxy=explicit_proxy,
+        request_label="passwordless-login-send-otp",
+        headers=req_headers,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"passwordless_send_otp status={response.status_code} body={_response_preview(response)}"
+        )
+    print(
+        "[python-protocol-service] passwordless login OTP requested "
+        f"status={response.status_code} page_type={_extract_page_type(response) or 'unknown'}"
+    )
+    return response
 
 
 def _verify_login_password(
@@ -5869,6 +5904,68 @@ def _verify_login_password(
         )
 
     return response
+
+
+def _resolve_repair_oauth_entry(
+    session: requests.Session,
+    *,
+    signup_response: Any,
+    password: str,
+    mailbox_ref: str,
+    explicit_proxy: str | None,
+    header_builder: ProtocolSentinelContext | None = None,
+) -> tuple[Any, str, str]:
+    page_type = _extract_page_type(signup_response)
+    oauth_entry_response: Any | None = signup_response
+    oauth_entry_referer = LOGIN_OR_CREATE_ACCOUNT_REFERER
+    if page_type == "login_password":
+        if password:
+            pwd_resp = _verify_login_password(
+                session,
+                password=password,
+                explicit_proxy=explicit_proxy,
+                header_builder=header_builder,
+            )
+            page_type = _extract_page_type(pwd_resp)
+            print(
+                "[python-protocol-service] password accepted "
+                f"next_page_type={page_type or 'unknown'}"
+            )
+            oauth_entry_response = pwd_resp
+            oauth_entry_referer = LOGIN_PASSWORD_REFERER
+        elif mailbox_ref:
+            print(
+                "[python-protocol-service] password missing, attempting "
+                "passwordless email OTP fallback from login page"
+            )
+            otp_resp = _send_passwordless_login_otp(
+                session,
+                explicit_proxy=explicit_proxy,
+                header_builder=header_builder,
+            )
+            page_type = _extract_page_type(otp_resp) or "email_otp_verification"
+            oauth_entry_response = otp_resp
+            oauth_entry_referer = EMAIL_VERIFICATION_REFERER
+        else:
+            _raise_protocol_error(
+                "missing_password",
+                stage="stage_create_account",
+                detail="missing_password",
+                category="flow_error",
+            )
+    elif page_type in {"email_otp_send", "email_otp_verification"}:
+        print(
+            "[python-protocol-service] passwordless login flow detected "
+            f"next_page_type={page_type or 'unknown'}"
+        )
+    else:
+        _raise_protocol_error(
+            f"unsupported_protocol_repair_page_type page_type={page_type or 'unknown'}",
+            stage="stage_create_account",
+            detail="authorize_continue_repair",
+            category="flow_error",
+        )
+    return oauth_entry_response, page_type, oauth_entry_referer
 
 
 def _fetch_chatgpt_home_html(
@@ -8761,13 +8858,6 @@ def run_protocol_repair_once(
             detail="missing_email",
             category="flow_error",
         )
-    if not password:
-        _raise_protocol_error(
-            "missing_password",
-            stage="stage_other",
-            detail="missing_password",
-            category="flow_error",
-        )
     if not mailbox_ref and session_id:
         mailbox_ref = f"mail-dispatch:{session_id}"
 
@@ -8964,22 +9054,17 @@ def run_protocol_repair_once(
                 default_category="flow_error",
             )
 
-        page_type = _extract_page_type(signup_response)
-        if page_type != "login_password":
-            _raise_protocol_error(
-                f"protocol_repair_requires_login_password page_type={page_type or 'unknown'}",
-                stage="stage_create_account",
-                detail="authorize_continue_repair",
-                category="flow_error",
-            )
-
         try:
-            pwd_resp = _verify_login_password(
+            oauth_entry_response, page_type, oauth_entry_referer = _resolve_repair_oauth_entry(
                 session,
+                signup_response=signup_response,
                 password=password,
+                mailbox_ref=mailbox_ref,
                 explicit_proxy=explicit_proxy,
                 header_builder=sentinel_context,
             )
+        except ProtocolRuntimeError:
+            raise
         except Exception as exc:
             raise _wrap_protocol_error(
                 exc,
@@ -8987,14 +9072,6 @@ def run_protocol_repair_once(
                 detail="password_verify",
                 category="auth_error",
             ) from exc
-        page_type = _extract_page_type(pwd_resp)
-        print(
-            "[python-protocol-service] password accepted "
-            f"next_page_type={page_type or 'unknown'}"
-        )
-
-        oauth_entry_response: Any | None = pwd_resp
-        oauth_entry_referer = LOGIN_PASSWORD_REFERER
         if page_type == "email_otp_send":
             if not mailbox_ref:
                 _raise_protocol_error(
