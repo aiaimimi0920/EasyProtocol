@@ -4,6 +4,10 @@ param(
     [int]$GatewayHostPort = 29789,
     [int]$PythonManagerHostPort = 29103,
     [string]$InstanceRoot = '',
+    [string]$RegisterOutputDirHost = '',
+    [string]$RegisterTeamAuthDirHost = '',
+    [string]$RegisterTeamLocalDirHost = '',
+    [string]$MailboxServiceApiKey = '',
     [switch]$NoBuild
 )
 
@@ -33,6 +37,125 @@ function Get-DefaultInstanceRoot {
     return (Join-Path $gameEditorRoot 'linshi\EasyProtocol\instances')
 }
 
+function Resolve-PreferredHostPath {
+    param(
+        [string]$ExplicitPath,
+        [string]$ConfiguredPath,
+        [string]$DefaultPath
+    )
+
+    foreach ($candidate in @($ExplicitPath, $ConfiguredPath, $DefaultPath)) {
+        $normalized = [string]$candidate
+        if (-not [string]::IsNullOrWhiteSpace($normalized)) {
+            return $normalized
+        }
+    }
+
+    return ''
+}
+
+function Get-DefaultRegisterOutputDirHost {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InstanceRoot
+    )
+
+    return (Join-Path $InstanceRoot 'register-output')
+}
+
+function Test-LegacyRegisterOutputPlaceholder {
+    param(
+        [string]$Path
+    )
+
+    $normalized = ([string]$Path).Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) {
+        return $false
+    }
+    $normalized = $normalized.Replace('\', '/').TrimEnd('/').ToLowerInvariant()
+    return $normalized -eq 'c:/easyprotocol/register-output'
+}
+
+function Find-EasyEmailConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $gameEditorRoot = Split-Path -Parent $RepoRoot
+    $candidates = @(
+        (Join-Path $gameEditorRoot 'EasyEmail\config.yaml'),
+        (Join-Path $gameEditorRoot 'EmailService\deploy\EasyEmail\config.yaml')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
+function Read-EasyEmailServerApiKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $configPath = Find-EasyEmailConfigPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        return ''
+    }
+
+    Assert-EasyProtocolPythonModule -ModuleName 'yaml' -PackageName 'pyyaml'
+    $resolvedConfigPath = Resolve-EasyProtocolPath -Path $configPath
+    $script = @"
+import pathlib
+import yaml
+payload = yaml.safe_load(pathlib.Path(r'''$resolvedConfigPath''').read_text(encoding='utf-8')) or {}
+service_base = payload.get('serviceBase') if isinstance(payload, dict) else {}
+runtime = service_base.get('runtime') if isinstance(service_base, dict) else {}
+server = runtime.get('server') if isinstance(runtime, dict) else {}
+print(str(server.get('apiKey') or ''))
+"@
+    $apiKey = (& python -c $script)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to read EasyEmail server apiKey from $resolvedConfigPath"
+    }
+    return [string]$apiKey
+}
+
+function Set-EnvFileVariable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $lines = @()
+    if (Test-Path -LiteralPath $Path) {
+        $lines = Get-Content -LiteralPath $Path
+    }
+
+    $updated = $false
+    for ($index = 0; $index -lt $lines.Count; $index += 1) {
+        if ($lines[$index] -match ('^' + [regex]::Escape($Name) + '=')) {
+            $lines[$index] = "$Name=$Value"
+            $updated = $true
+            break
+        }
+    }
+
+    if (-not $updated) {
+        $lines += "$Name=$Value"
+    }
+
+    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
+}
+
 $repoRoot = Get-EasyProtocolRepoRoot
 $resolvedConfigPath = if ([System.IO.Path]::IsPathRooted($ConfigPath)) { $ConfigPath } else { Join-Path $repoRoot $ConfigPath }
 if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
@@ -52,10 +175,49 @@ if ($null -eq $pythonProvider) {
     throw 'Missing providers.python section in config.yaml.'
 }
 
+$instanceRootBase = if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
+    Get-DefaultInstanceRoot -RepoRoot $repoRoot
+} elseif ([System.IO.Path]::IsPathRooted($InstanceRoot)) {
+    $InstanceRoot
+} else {
+    Join-Path $repoRoot $InstanceRoot
+}
+
+$instanceRoot = Join-Path $instanceRootBase $InstanceName
+$configDir = Join-Path $instanceRoot 'gateway-config'
+$dataDir = Join-Path $instanceRoot 'gateway-data'
+$envFile = Join-Path $instanceRoot 'python-manager.env'
+$gatewayConfigPath = Join-Path $configDir 'config.yaml'
+
 $pythonMounts = $pythonProvider.hostMounts
-$registerOutputDirHost = [string]$pythonMounts.registerOutputDirHost
-$registerTeamAuthDirHost = [string]$pythonMounts.registerTeamAuthDirHost
-$registerTeamLocalDirHost = [string]$pythonMounts.registerTeamLocalDirHost
+$configuredRegisterOutputDirHost = [string]$pythonMounts.registerOutputDirHost
+$configuredRegisterTeamAuthDirHost = [string]$pythonMounts.registerTeamAuthDirHost
+$configuredRegisterTeamLocalDirHost = [string]$pythonMounts.registerTeamLocalDirHost
+
+if ([string]::IsNullOrWhiteSpace($RegisterOutputDirHost) -and (Test-LegacyRegisterOutputPlaceholder -Path $configuredRegisterOutputDirHost)) {
+    $configuredRegisterOutputDirHost = ''
+}
+
+$registerOutputDirHost = Resolve-PreferredHostPath `
+    -ExplicitPath $RegisterOutputDirHost `
+    -ConfiguredPath $configuredRegisterOutputDirHost `
+    -DefaultPath (Get-DefaultRegisterOutputDirHost -InstanceRoot $instanceRoot)
+$registerTeamAuthDirHost = Resolve-PreferredHostPath `
+    -ExplicitPath $RegisterTeamAuthDirHost `
+    -ConfiguredPath $configuredRegisterTeamAuthDirHost `
+    -DefaultPath ''
+$registerTeamLocalDirHost = Resolve-PreferredHostPath `
+    -ExplicitPath $RegisterTeamLocalDirHost `
+    -ConfiguredPath $configuredRegisterTeamLocalDirHost `
+    -DefaultPath ''
+
+$resolvedMailboxServiceApiKey = [string]$MailboxServiceApiKey
+if ([string]::IsNullOrWhiteSpace($resolvedMailboxServiceApiKey)) {
+    $resolvedMailboxServiceApiKey = [string]$env:MAILBOX_SERVICE_API_KEY
+}
+if ([string]::IsNullOrWhiteSpace($resolvedMailboxServiceApiKey)) {
+    $resolvedMailboxServiceApiKey = Read-EasyEmailServerApiKey -RepoRoot $repoRoot
+}
 
 foreach ($path in @($registerOutputDirHost, $registerTeamAuthDirHost, $registerTeamLocalDirHost)) {
     if (-not [string]::IsNullOrWhiteSpace($path) -and -not (Test-Path -LiteralPath $path)) {
@@ -76,20 +238,6 @@ if (-not $NoBuild) {
 
 Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
 
-$instanceRootBase = if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
-    Get-DefaultInstanceRoot -RepoRoot $repoRoot
-} elseif ([System.IO.Path]::IsPathRooted($InstanceRoot)) {
-    $InstanceRoot
-} else {
-    Join-Path $repoRoot $InstanceRoot
-}
-
-$instanceRoot = Join-Path $instanceRootBase $InstanceName
-$configDir = Join-Path $instanceRoot 'gateway-config'
-$dataDir = Join-Path $instanceRoot 'gateway-data'
-$envFile = Join-Path $instanceRoot 'python-manager.env'
-$gatewayConfigPath = Join-Path $configDir 'config.yaml'
-
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
@@ -104,6 +252,12 @@ Set-Content -LiteralPath $gatewayConfigPath -Value $gatewayConfigText -Encoding 
 
 $renderedEnvPath = Join-Path $repoRoot 'deploy/stacks/easy-protocol/generated/stack.env'
 Copy-Item -LiteralPath $renderedEnvPath -Destination $envFile -Force
+Set-EnvFileVariable -Path $envFile -Name 'REGISTER_OUTPUT_DIR_HOST' -Value $registerOutputDirHost
+Set-EnvFileVariable -Path $envFile -Name 'REGISTER_TEAM_AUTH_DIR_HOST' -Value $registerTeamAuthDirHost
+Set-EnvFileVariable -Path $envFile -Name 'REGISTER_TEAM_LOCAL_DIR_HOST' -Value $registerTeamLocalDirHost
+if (-not [string]::IsNullOrWhiteSpace($resolvedMailboxServiceApiKey)) {
+    Set-EnvFileVariable -Path $envFile -Name 'MAILBOX_SERVICE_API_KEY' -Value $resolvedMailboxServiceApiKey
+}
 
 $existingContainers = @(docker ps -a --format '{{.Names}}')
 if ($LASTEXITCODE -ne 0) {
@@ -126,6 +280,7 @@ docker run -d `
     --name $managerContainerName `
     --network EasyAiMi `
     --network-alias $managerAlias `
+    --network-alias $managerContainerName `
     -p "${PythonManagerHostPort}:9100" `
     --env-file $envFile `
     -v "${registerOutputDirHost}:/shared/register-output" `
@@ -140,6 +295,7 @@ docker run -d `
     --name $gatewayContainerName `
     --network EasyAiMi `
     --network-alias "easy-protocol-service-$InstanceName" `
+    --network-alias $gatewayContainerName `
     -p "${GatewayHostPort}:9788" `
     -e EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml `
     -e EASY_PROTOCOL_STATE_DIR=/var/lib/easy-protocol `
@@ -200,6 +356,10 @@ if ($null -eq $managerPool) {
 [pscustomobject]@{
     instanceName          = $InstanceName
     network               = 'EasyAiMi'
+    registerOutputDirHost = $registerOutputDirHost
+    registerTeamAuthDirHost = $registerTeamAuthDirHost
+    registerTeamLocalDirHost = $registerTeamLocalDirHost
+    managerAlias          = $managerAlias
     managerContainerName  = $managerContainerName
     managerBaseUrl        = $managerBaseUrl
     gatewayContainerName  = $gatewayContainerName

@@ -22,7 +22,11 @@ param(
     [string]$ProviderTarget = 'all',
     [string]$InstanceName = 'dyn01',
     [int]$GatewayHostPort = 29789,
-    [int]$PythonManagerHostPort = 29103
+    [int]$PythonManagerHostPort = 29103,
+    [string]$RegisterOutputDirHost = '',
+    [string]$RegisterTeamAuthDirHost = '',
+    [string]$RegisterTeamLocalDirHost = '',
+    [string]$MailboxServiceApiKey = ''
 )
 
 Set-StrictMode -Version Latest
@@ -112,6 +116,10 @@ switch ($Project) {
             GatewayHostPort = $GatewayHostPort
             PythonManagerHostPort = $PythonManagerHostPort
         }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $invokeParams.RegisterOutputDirHost = $RegisterOutputDirHost }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $invokeParams.RegisterTeamAuthDirHost = $RegisterTeamAuthDirHost }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $invokeParams.RegisterTeamLocalDirHost = $RegisterTeamLocalDirHost }
+        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $invokeParams.MailboxServiceApiKey = $MailboxServiceApiKey }
         if ($NoBuild) { $invokeParams.NoBuild = $true }
         & (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') @invokeParams
         break
