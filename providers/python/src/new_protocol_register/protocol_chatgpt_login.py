@@ -126,6 +126,23 @@ def _chatgpt_login_request(
     raise RuntimeError(f"chatgpt_login_request_failed label={request_label}")
 
 
+def _chatgpt_login_step_retryable(exc: BaseException) -> bool:
+    if _chatgpt_login_network_error_is_retryable(exc):
+        return True
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "chatgpt_login_authorize_init_failed",
+            "chatgpt_login_authorize_continue_failed",
+            "chatgpt_nextauth_signin",
+            "chatgpt_nextauth_callback_failed",
+        )
+    )
+
+
 def _normalize_seed_login_context(
     seed_payload: dict[str, Any],
     *,
@@ -435,311 +452,347 @@ def run_protocol_chatgpt_login_init_from_path(
 
     explicit_proxy = normalize_proxy_env_url(explicit_proxy) or None
     verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
-    session = requests.Session(
-        impersonate="chrome",
-        timeout=30,
-        verify=verify_tls,
-    )
-    session.headers.update({"user-agent": DEFAULT_PROTOCOL_USER_AGENT})
-    if device_id:
-        try:
-            seed_device_cookie(session, device_id)
-        except Exception:
-            pass
-
-    otp_min_mail_id = 0
-    used_password_verify = False
-    used_email_otp = False
-    auth_url = ""
-    callback_url = ""
-    final_url = ""
-    selected_workspace_id = ""
-    personal_workspace_id = ""
-    account_entries: list[dict[str, Any]] = []
-
-    try:
-        with flow_network_env():
+    max_network_attempts = 2
+    last_exc: BaseException | None = None
+    for network_attempt in range(1, max_network_attempts + 1):
+        session = requests.Session(
+            impersonate="chrome",
+            timeout=30,
+            verify=verify_tls,
+        )
+        session.headers.update({"user-agent": DEFAULT_PROTOCOL_USER_AGENT})
+        if device_id:
             try:
-                otp_min_mail_id = get_mailbox_latest_message_id(
-                    mailbox_ref=mailbox_ref_value,
-                    session_id=mailbox_session_id_value,
-                    mailcreate_base_url=MAILCREATE_BASE_URL,
-                    mailcreate_custom_auth=MAILCREATE_CUSTOM_AUTH,
-                )
+                seed_device_cookie(session, device_id)
             except Exception:
-                otp_min_mail_id = 0
+                pass
 
-            sentinel_context = _new_protocol_sentinel_context(
-                session,
-                explicit_proxy=explicit_proxy,
-                user_agent=DEFAULT_PROTOCOL_USER_AGENT,
-            )
-            auth_url = _bootstrap_chatgpt_login_with_redirect(
-                session=session,
-                device_id=device_id,
-                explicit_proxy=explicit_proxy,
-            )
-            authorize_init_response = _chatgpt_login_request(
-                session,
-                "GET",
-                auth_url,
-                explicit_proxy=explicit_proxy,
-                request_label="chatgpt-login-authorize-init",
-                timeout=20,
-            )
-            if int(getattr(authorize_init_response, "status_code", 0) or 0) >= 400:
-                raise ProtocolRuntimeError(
-                    f"chatgpt_login_authorize_init_failed status={getattr(authorize_init_response, 'status_code', 0)} "
-                    f"body={_response_preview(authorize_init_response, 220)}",
-                    stage="stage_auth_continue",
-                    detail="chatgpt_login_authorize_init",
-                    category="auth_error" if _response_has_cloudflare_challenge(authorize_init_response) else "flow_error",
-                )
-
-            authorize_continue_headers = _build_protocol_headers(
-                request_kind="",
-                referer=LOGIN_OR_CREATE_ACCOUNT_REFERER,
-            )
-            authorize_continue_headers["openai-sentinel-token"] = _get_sentinel_header_for_signup(
-                session,
-                device_id=device_id,
-                flow="authorize_continue",
-                request_kind="chatgpt-login-authorize-continue",
-                explicit_proxy=explicit_proxy,
-                sentinel_context=sentinel_context,
-            )
-            authorize_continue_headers["oai-device-id"] = device_id
-            continue_response = _chatgpt_login_request(
-                session,
-                "POST",
-                AUTHORIZE_CONTINUE_URL,
-                explicit_proxy=explicit_proxy,
-                request_label="chatgpt-login-authorize-continue",
-                headers=authorize_continue_headers,
-                data=json.dumps(
-                    {
-                        "username": {
-                            "value": email,
-                            "kind": "email",
-                        },
-                        "screen_hint": "login",
-                    }
-                ),
-            )
-            if int(getattr(continue_response, "status_code", 0) or 0) != 200:
-                raise ProtocolRuntimeError(
-                    f"chatgpt_login_authorize_continue_failed status={getattr(continue_response, 'status_code', 0)} "
-                    f"body={_response_preview(continue_response, 220)}",
-                    stage="stage_auth_continue",
-                    detail="chatgpt_login_authorize_continue",
-                    category="blocked" if _response_has_cloudflare_challenge(continue_response) else "flow_error",
-                )
-
-            oauth_entry_response = continue_response
-            page_type = _extract_page_type(oauth_entry_response)
-            if page_type == "login_password":
-                if not password:
-                    raise ProtocolRuntimeError(
-                        "chatgpt_login_password_required",
-                        stage="stage_create_account",
-                        detail="chatgpt_login_password_verify",
-                        category="auth_error",
+        otp_min_mail_id = 0
+        used_password_verify = False
+        used_email_otp = False
+        auth_url = ""
+        callback_url = ""
+        final_url = ""
+        selected_workspace_id = ""
+        personal_workspace_id = ""
+        account_entries: list[dict[str, Any]] = []
+        oauth_entry_response = None
+        bootstrap_auth_status = ""
+        bootstrap_account_id = ""
+        bootstrap_plan_type = ""
+        bootstrap_structure = ""
+        bootstrap_access_token = ""
+        bootstrap_user: dict[str, Any] = {}
+        try:
+            with flow_network_env():
+                try:
+                    otp_min_mail_id = get_mailbox_latest_message_id(
+                        mailbox_ref=mailbox_ref_value,
+                        session_id=mailbox_session_id_value,
+                        mailcreate_base_url=MAILCREATE_BASE_URL,
+                        mailcreate_custom_auth=MAILCREATE_CUSTOM_AUTH,
                     )
-                oauth_entry_response = _verify_login_password(
-                    session,
-                    password=password,
-                    explicit_proxy=explicit_proxy,
-                    header_builder=sentinel_context,
-                )
-                used_password_verify = True
-                page_type = _extract_page_type(oauth_entry_response)
+                except Exception:
+                    otp_min_mail_id = 0
 
-            if page_type == "email_otp_send":
-                _send_email_otp(
+                sentinel_context = _new_protocol_sentinel_context(
                     session,
                     explicit_proxy=explicit_proxy,
-                    header_builder=sentinel_context,
+                    user_agent=DEFAULT_PROTOCOL_USER_AGENT,
                 )
-                page_type = "email_otp_verification"
+                auth_url = _bootstrap_chatgpt_login_with_redirect(
+                    session=session,
+                    device_id=device_id,
+                    explicit_proxy=explicit_proxy,
+                )
+                authorize_init_response = _chatgpt_login_request(
+                    session,
+                    "GET",
+                    auth_url,
+                    explicit_proxy=explicit_proxy,
+                    request_label="chatgpt-login-authorize-init",
+                    timeout=20,
+                )
+                if int(getattr(authorize_init_response, "status_code", 0) or 0) >= 400:
+                    raise ProtocolRuntimeError(
+                        f"chatgpt_login_authorize_init_failed status={getattr(authorize_init_response, 'status_code', 0)} "
+                        f"body={_response_preview(authorize_init_response, 220)}",
+                        stage="stage_auth_continue",
+                        detail="chatgpt_login_authorize_init",
+                        category="auth_error" if _response_has_cloudflare_challenge(authorize_init_response) else "flow_error",
+                    )
 
-            if page_type == "email_otp_verification":
-                otp_code = _wait_for_email_otp(
-                    mailbox_ref=mailbox_ref_value,
-                    mailbox_session_id=mailbox_session_id_value,
-                    min_mail_id=otp_min_mail_id,
+                authorize_continue_headers = _build_protocol_headers(
+                    request_kind="",
+                    referer=LOGIN_OR_CREATE_ACCOUNT_REFERER,
                 )
-                used_email_otp = True
-                otp_validate_headers = _build_protocol_headers(
-                    request_kind="otp-validate",
-                    referer=EMAIL_VERIFICATION_REFERER,
+                authorize_continue_headers["openai-sentinel-token"] = _get_sentinel_header_for_signup(
+                    session,
+                    device_id=device_id,
+                    flow="authorize_continue",
+                    request_kind="chatgpt-login-authorize-continue",
+                    explicit_proxy=explicit_proxy,
                     sentinel_context=sentinel_context,
                 )
-                otp_validate_headers["oai-device-id"] = device_id
-                oauth_entry_response = _chatgpt_login_request(
+                authorize_continue_headers["oai-device-id"] = device_id
+                continue_response = _chatgpt_login_request(
                     session,
                     "POST",
-                    EMAIL_OTP_VALIDATE_URL,
+                    AUTHORIZE_CONTINUE_URL,
                     explicit_proxy=explicit_proxy,
-                    request_label="chatgpt-login-otp-validate",
-                    headers=otp_validate_headers,
-                    data=json.dumps({"code": otp_code}),
+                    request_label="chatgpt-login-authorize-continue",
+                    headers=authorize_continue_headers,
+                    data=json.dumps(
+                        {
+                            "username": {
+                                "value": email,
+                                "kind": "email",
+                            },
+                            "screen_hint": "login",
+                        }
+                    ),
                 )
-                if int(getattr(oauth_entry_response, "status_code", 0) or 0) >= 400:
+                if int(getattr(continue_response, "status_code", 0) or 0) != 200:
                     raise ProtocolRuntimeError(
-                        f"chatgpt_login_otp_validate_failed status={getattr(oauth_entry_response, 'status_code', 0)} "
-                        f"body={_response_preview(oauth_entry_response, 220)}",
-                        stage="stage_otp_validate",
-                        detail="chatgpt_login_email_otp_validate",
-                        category="flow_error",
+                        f"chatgpt_login_authorize_continue_failed status={getattr(continue_response, 'status_code', 0)} "
+                        f"body={_response_preview(continue_response, 220)}",
+                        stage="stage_auth_continue",
+                        detail="chatgpt_login_authorize_continue",
+                        category="blocked" if _response_has_cloudflare_challenge(continue_response) else "flow_error",
                     )
+
+                oauth_entry_response = continue_response
                 page_type = _extract_page_type(oauth_entry_response)
-
-            oauth_entry_response = _complete_external_continue_url(
-                session,
-                oauth_entry_response,
-                explicit_proxy=explicit_proxy,
-                request_label="chatgpt-login",
-                referer=EMAIL_VERIFICATION_REFERER,
-            )
-
-            response_url = _response_url(oauth_entry_response)
-            response_html = str(getattr(oauth_entry_response, "text", "") or "")
-            client_bootstrap = _extract_chatgpt_client_bootstrap(response_html)
-            bootstrap_session = client_bootstrap.get("session") if isinstance(client_bootstrap.get("session"), dict) else {}
-            bootstrap_account = bootstrap_session.get("account") if isinstance(bootstrap_session.get("account"), dict) else {}
-            bootstrap_user = bootstrap_session.get("user") if isinstance(bootstrap_session.get("user"), dict) else {}
-            bootstrap_auth_status = str(client_bootstrap.get("authStatus") or "").strip().lower()
-            bootstrap_account_id = str(bootstrap_account.get("id") or "").strip()
-            bootstrap_plan_type = str(bootstrap_account.get("planType") or "").strip().lower()
-            bootstrap_structure = str(bootstrap_account.get("structure") or "").strip().lower()
-            bootstrap_access_token = str(bootstrap_session.get("accessToken") or "").strip()
-            personal_entry: dict[str, Any] | None = None
-            if (
-                bootstrap_auth_status == "logged_in"
-                and bootstrap_account_id
-                and bootstrap_structure == "personal"
-                and bootstrap_plan_type == "free"
-            ):
-                personal_entry = {
-                    "id": bootstrap_account_id,
-                    "kind": "personal",
-                    "name": "Personal",
-                    "title": "Personal",
-                    "source": "client_bootstrap",
-                }
-                account_entries = [personal_entry]
-                final_url = response_url
-                selected_workspace_id = bootstrap_account_id
-            else:
-                account_entries, personal_entry = _load_accounts_with_personal_preference(
-                    session=session,
-                    explicit_proxy=explicit_proxy,
-                )
-                if personal_entry is not None:
-                    final_url = response_url
-                    selected_workspace_id = str(personal_entry.get("id") or "").strip()
-            if personal_entry is None:
-                callback_candidate = response_url if _is_chatgpt_callback_url(response_url) else ""
-                if not callback_candidate:
-                    callback_candidate = ""
-                if callback_candidate:
-                    callback_url = callback_candidate
-                    callback_response = _complete_chatgpt_nextauth_callback(
-                        session=session,
-                        callback_url=callback_url,
+                if page_type == "login_password":
+                    if not password:
+                        raise ProtocolRuntimeError(
+                            "chatgpt_login_password_required",
+                            stage="stage_create_account",
+                            detail="chatgpt_login_password_verify",
+                            category="auth_error",
+                        )
+                    oauth_entry_response = _verify_login_password(
+                        session,
+                        password=password,
                         explicit_proxy=explicit_proxy,
+                        header_builder=sentinel_context,
                     )
-                    final_url = _response_url(callback_response) or callback_url
+                    used_password_verify = True
+                    page_type = _extract_page_type(oauth_entry_response)
+
+                if page_type == "email_otp_send":
+                    _send_email_otp(
+                        session,
+                        explicit_proxy=explicit_proxy,
+                        header_builder=sentinel_context,
+                    )
+                    page_type = "email_otp_verification"
+
+                if page_type == "email_otp_verification":
+                    otp_code = _wait_for_email_otp(
+                        mailbox_ref=mailbox_ref_value,
+                        mailbox_session_id=mailbox_session_id_value,
+                        min_mail_id=otp_min_mail_id,
+                    )
+                    used_email_otp = True
+                    otp_validate_headers = _build_protocol_headers(
+                        request_kind="otp-validate",
+                        referer=EMAIL_VERIFICATION_REFERER,
+                        sentinel_context=sentinel_context,
+                    )
+                    otp_validate_headers["oai-device-id"] = device_id
+                    oauth_entry_response = _chatgpt_login_request(
+                        session,
+                        "POST",
+                        EMAIL_OTP_VALIDATE_URL,
+                        explicit_proxy=explicit_proxy,
+                        request_label="chatgpt-login-otp-validate",
+                        headers=otp_validate_headers,
+                        data=json.dumps({"code": otp_code}),
+                    )
+                    if int(getattr(oauth_entry_response, "status_code", 0) or 0) >= 400:
+                        raise ProtocolRuntimeError(
+                            f"chatgpt_login_otp_validate_failed status={getattr(oauth_entry_response, 'status_code', 0)} "
+                            f"body={_response_preview(oauth_entry_response, 220)}",
+                            stage="stage_otp_validate",
+                            detail="chatgpt_login_email_otp_validate",
+                            category="flow_error",
+                        )
+                    page_type = _extract_page_type(oauth_entry_response)
+
+                oauth_entry_response = _complete_external_continue_url(
+                    session,
+                    oauth_entry_response,
+                    explicit_proxy=explicit_proxy,
+                    request_label="chatgpt-login",
+                    referer=EMAIL_VERIFICATION_REFERER,
+                )
+
+                response_url = _response_url(oauth_entry_response)
+                response_html = str(getattr(oauth_entry_response, "text", "") or "")
+                client_bootstrap = _extract_chatgpt_client_bootstrap(response_html)
+                bootstrap_session = client_bootstrap.get("session") if isinstance(client_bootstrap.get("session"), dict) else {}
+                bootstrap_account = bootstrap_session.get("account") if isinstance(bootstrap_session.get("account"), dict) else {}
+                bootstrap_user = bootstrap_session.get("user") if isinstance(bootstrap_session.get("user"), dict) else {}
+                bootstrap_auth_status = str(client_bootstrap.get("authStatus") or "").strip().lower()
+                bootstrap_account_id = str(bootstrap_account.get("id") or "").strip()
+                bootstrap_plan_type = str(bootstrap_account.get("planType") or "").strip().lower()
+                bootstrap_structure = str(bootstrap_account.get("structure") or "").strip().lower()
+                bootstrap_access_token = str(bootstrap_session.get("accessToken") or "").strip()
+                personal_entry: dict[str, Any] | None = None
+                if (
+                    bootstrap_auth_status == "logged_in"
+                    and bootstrap_account_id
+                    and bootstrap_structure == "personal"
+                    and bootstrap_plan_type == "free"
+                ):
+                    personal_entry = {
+                        "id": bootstrap_account_id,
+                        "kind": "personal",
+                        "name": "Personal",
+                        "title": "Personal",
+                        "source": "client_bootstrap",
+                    }
+                    account_entries = [personal_entry]
+                    final_url = response_url
+                    selected_workspace_id = bootstrap_account_id
+                else:
                     account_entries, personal_entry = _load_accounts_with_personal_preference(
                         session=session,
                         explicit_proxy=explicit_proxy,
                     )
                     if personal_entry is not None:
+                        final_url = response_url
                         selected_workspace_id = str(personal_entry.get("id") or "").strip()
                 if personal_entry is None:
-                    with temporary_workspace_selector_overrides({"PROTOCOL_PREFERRED_WORKSPACE_KIND": "personal"}):
-                        selected_workspace_id = _extract_workspace_id_from_session(
-                            session,
-                            explicit_proxy=explicit_proxy,
-                        )
-                        callback_url = _submit_workspace_selection_for_callback(
+                    callback_candidate = response_url if _is_chatgpt_callback_url(response_url) else ""
+                    if not callback_candidate:
+                        callback_candidate = ""
+                    if callback_candidate:
+                        callback_url = callback_candidate
+                        callback_response = _complete_chatgpt_nextauth_callback(
                             session=session,
-                            workspace_id=selected_workspace_id,
+                            callback_url=callback_url,
                             explicit_proxy=explicit_proxy,
-                            referer=response_url or EMAIL_VERIFICATION_REFERER,
-                            workspace_request_label="chatgpt-login-workspace-select",
-                            header_builder=sentinel_context,
                         )
-                    callback_response = _complete_chatgpt_nextauth_callback(
-                        session=session,
-                        callback_url=callback_url,
-                        explicit_proxy=explicit_proxy,
+                        final_url = _response_url(callback_response) or callback_url
+                        account_entries, personal_entry = _load_accounts_with_personal_preference(
+                            session=session,
+                            explicit_proxy=explicit_proxy,
+                        )
+                        if personal_entry is not None:
+                            selected_workspace_id = str(personal_entry.get("id") or "").strip()
+                    if personal_entry is None:
+                        with temporary_workspace_selector_overrides({"PROTOCOL_PREFERRED_WORKSPACE_KIND": "personal"}):
+                            selected_workspace_id = _extract_workspace_id_from_session(
+                                session,
+                                explicit_proxy=explicit_proxy,
+                            )
+                            callback_url = _submit_workspace_selection_for_callback(
+                                session=session,
+                                workspace_id=selected_workspace_id,
+                                explicit_proxy=explicit_proxy,
+                                referer=response_url or EMAIL_VERIFICATION_REFERER,
+                                workspace_request_label="chatgpt-login-workspace-select",
+                                header_builder=sentinel_context,
+                            )
+                        callback_response = _complete_chatgpt_nextauth_callback(
+                            session=session,
+                            callback_url=callback_url,
+                            explicit_proxy=explicit_proxy,
+                        )
+                        final_url = _response_url(callback_response) or callback_url
+                        account_entries, personal_entry = _load_accounts_with_personal_preference(
+                            session=session,
+                            explicit_proxy=explicit_proxy,
+                        )
+                personal_workspace_id = str((personal_entry or {}).get("id") or "").strip()
+                if not personal_workspace_id:
+                    raise ProtocolRuntimeError(
+                        "chatgpt_login_personal_workspace_missing",
+                        stage="stage_callback",
+                        detail="chatgpt_login_personal_workspace_missing",
+                        category="auth_error",
                     )
-                    final_url = _response_url(callback_response) or callback_url
-                    account_entries, personal_entry = _load_accounts_with_personal_preference(
-                        session=session,
-                        explicit_proxy=explicit_proxy,
-                    )
-            personal_workspace_id = str((personal_entry or {}).get("id") or "").strip()
-            if not personal_workspace_id:
-                raise ProtocolRuntimeError(
-                    "chatgpt_login_personal_workspace_missing",
-                    stage="stage_callback",
-                    detail="chatgpt_login_personal_workspace_missing",
-                    category="auth_error",
-                )
 
-        result = {
-            "ok": True,
-            "status": "completed",
-            "sourcePath": str(seed_path),
-            "authUrl": auth_url,
-            "callbackUrl": callback_url,
-            "finalUrl": final_url,
-            "workspaceId": selected_workspace_id,
-            "personalWorkspaceId": personal_workspace_id,
-            "accountCount": len(account_entries),
-            "personalAccountCount": sum(
-                1 for entry in account_entries if str(entry.get("kind") or "").strip().lower() == "personal"
-            ),
-            "usedPasswordVerify": used_password_verify,
-            "usedEmailOtp": used_email_otp,
-            "deviceId": device_id,
-            "mailboxRef": mailbox_ref_value,
-            "mailboxSessionId": mailbox_session_id_value,
-        }
-        updated_payload = dict(seed_payload)
-        updated_payload["mailboxRef"] = mailbox_ref_value
-        updated_payload["mailboxAccessKey"] = mailbox_ref_value
-        updated_payload["mailboxSessionId"] = mailbox_session_id_value
-        updated_payload["chatgptLogin"] = result
-        updated_payload["chatgptLoginDetails"] = {
-            "accounts": account_entries,
-            "clientBootstrap": {
-                "authStatus": bootstrap_auth_status,
-                "accountId": bootstrap_account_id,
-                "planType": bootstrap_plan_type,
-                "structure": bootstrap_structure,
-                "accessTokenPresent": bool(bootstrap_access_token),
-                "userId": str(bootstrap_user.get("id") or "").strip(),
-                "email": str(bootstrap_user.get("email") or "").strip(),
-            },
-            "pageType": _extract_page_type(oauth_entry_response) or "",
-        }
-        seed_path.write_text(json.dumps(updated_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        return result
-    except Exception as exc:
+            result = {
+                "ok": True,
+                "status": "completed",
+                "sourcePath": str(seed_path),
+                "authUrl": auth_url,
+                "callbackUrl": callback_url,
+                "finalUrl": final_url,
+                "workspaceId": selected_workspace_id,
+                "personalWorkspaceId": personal_workspace_id,
+                "accountCount": len(account_entries),
+                "personalAccountCount": sum(
+                    1 for entry in account_entries if str(entry.get("kind") or "").strip().lower() == "personal"
+                ),
+                "usedPasswordVerify": used_password_verify,
+                "usedEmailOtp": used_email_otp,
+                "deviceId": device_id,
+                "mailboxRef": mailbox_ref_value,
+                "mailboxSessionId": mailbox_session_id_value,
+            }
+            updated_payload = dict(seed_payload)
+            updated_payload["mailboxRef"] = mailbox_ref_value
+            updated_payload["mailboxAccessKey"] = mailbox_ref_value
+            updated_payload["mailboxSessionId"] = mailbox_session_id_value
+            updated_payload["chatgptLogin"] = result
+            updated_payload["chatgptLoginDetails"] = {
+                "accounts": account_entries,
+                "clientBootstrap": {
+                    "authStatus": bootstrap_auth_status,
+                    "accountId": bootstrap_account_id,
+                    "planType": bootstrap_plan_type,
+                    "structure": bootstrap_structure,
+                    "accessTokenPresent": bool(bootstrap_access_token),
+                    "userId": str(bootstrap_user.get("id") or "").strip(),
+                    "email": str(bootstrap_user.get("email") or "").strip(),
+                },
+                "pageType": _extract_page_type(oauth_entry_response) or "",
+                "networkAttempt": network_attempt,
+            }
+            seed_path.write_text(json.dumps(updated_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if network_attempt < max_network_attempts and _chatgpt_login_step_retryable(exc):
+                print(
+                    "[protocol-chatgpt-login] retrying fresh session "
+                    f"network_attempt={network_attempt} err={exc}",
+                    flush=True,
+                )
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                continue
+            raise ensure_protocol_runtime_error(
+                exc,
+                stage="stage_auth_continue",
+                detail="chatgpt_login_init",
+                category="flow_error",
+            ) from exc
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    if last_exc is not None:
         raise ensure_protocol_runtime_error(
-            exc,
+            last_exc,
             stage="stage_auth_continue",
             detail="chatgpt_login_init",
             category="flow_error",
-        ) from exc
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
+        ) from last_exc
+    raise ProtocolRuntimeError(
+        "chatgpt_login_init_failed",
+        stage="stage_auth_continue",
+        detail="chatgpt_login_init",
+        category="flow_error",
+    )
 
 
 def _parse_args() -> argparse.Namespace:
