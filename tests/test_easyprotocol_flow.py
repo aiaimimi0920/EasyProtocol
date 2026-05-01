@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from new_protocol_register.easyprotocol_flow import _update_team_expand_progress_payload  # noqa: E402
+from new_protocol_register.magic import _classify_invite_error  # noqa: E402
 from new_protocol_register.protocol_small_success import (  # noqa: E402
     PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV,
     PROTOCOL_ENABLE_BROWSER_SENTINEL_ENV,
@@ -73,6 +74,15 @@ class EasyProtocolFlowTests(unittest.TestCase):
                 os.environ.pop(PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV, None)
             else:
                 os.environ[PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV] = original_stage2
+
+    def test_classify_invite_error_detects_deactivated_workspace(self) -> None:
+        payload = {
+            "detail": {
+                "code": "deactivated_workspace",
+            },
+            "status_code": 402,
+        }
+        self.assertEqual("deactivated_workspace", _classify_invite_error(402, payload))
 
 
 if __name__ == "__main__":

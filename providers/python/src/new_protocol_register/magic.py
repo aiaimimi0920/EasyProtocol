@@ -2165,6 +2165,8 @@ def _extract_detail(payload: Any) -> str:
 
 def _classify_invite_error(status: int, payload: Any) -> str:
     detail = _extract_detail(payload).lower()
+    if "deactivated_workspace" in detail:
+        return "deactivated_workspace"
     if "maximum number of seats" in detail or "workspace has reached maximum number of seats" in detail:
         return "team_seats_full"
     if "seat" in detail and ("full" in detail or "limit" in detail):
