@@ -162,6 +162,26 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(2, session_request.call_count)
 
+    def test_send_email_otp_retries_transient_network_error(self) -> None:
+        session = mock.Mock()
+        response = SimpleNamespace(status_code=200, url="https://auth.openai.com/api/accounts/email-otp/send")
+        with mock.patch.object(
+            protocol_register,
+            "_build_protocol_headers",
+            return_value={},
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=[RuntimeError("curl: (28) Operation timed out"), response],
+        ) as session_request:
+            result = protocol_register._send_email_otp(
+                session,
+                explicit_proxy="http://proxy:8080",
+                header_builder=None,
+            )
+        self.assertIs(result, response)
+        self.assertEqual(2, session_request.call_count)
+
     def test_extract_chatgpt_client_bootstrap_reads_access_token(self) -> None:
         html = """
         <html>
@@ -294,6 +314,7 @@ class EasyProtocolFlowTests(unittest.TestCase):
             explicit_proxy="http://proxy:8080",
             request_label="passwordless-login-send-otp",
             headers={"referer": protocol_register.LOGIN_PASSWORD_REFERER},
+            timeout=45,
         )
         self.assertIs(result, response)
 

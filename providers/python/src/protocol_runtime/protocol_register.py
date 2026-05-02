@@ -5785,6 +5785,65 @@ def _raise_if_phone_wall_response(response: Any, *, context: str) -> None:
     )
 
 
+def _protocol_request_error_is_retryable(exc: BaseException) -> bool:
+    text = str(exc or "").strip().lower()
+    if not text:
+        return False
+    retry_markers = (
+        "connection closed abruptly",
+        "handshake operation timed out",
+        "proxy connect aborted",
+        "proxy connect failed",
+        "operation timed out",
+        "recv failure",
+        "connection reset by peer",
+        "curl: (56)",
+        "curl: (35)",
+        "curl: (28)",
+        "curl: (7)",
+        "urlopen error",
+        "timed out",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+def _protocol_request_with_transient_retry(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    explicit_proxy: str | None,
+    request_label: str,
+    max_attempts: int = 3,
+    retry_sleep_seconds: float = 0.6,
+    **kwargs: Any,
+) -> Any:
+    attempts = max(1, int(max_attempts or 1))
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _session_request(
+                session,
+                method,
+                url,
+                explicit_proxy=explicit_proxy,
+                request_label=request_label,
+                **kwargs,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts or not _protocol_request_error_is_retryable(exc):
+                raise
+            print(
+                "[python-protocol-service] retrying transient request "
+                f"label={request_label} attempt={attempt} err={exc}"
+            )
+            time.sleep(max(0.1, float(retry_sleep_seconds)) * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"protocol_request_failed label={request_label}")
+
+
 def _send_email_otp(
     session: requests.Session,
     *,
@@ -5807,13 +5866,14 @@ def _send_email_otp(
         sentinel_context=header_builder,
     )
 
-    response = _session_request(
+    response = _protocol_request_with_transient_retry(
         session,
         "GET",
         EMAIL_OTP_SEND_URL,
         explicit_proxy=explicit_proxy,
         request_label="email-otp-send",
         headers=req_headers,
+        timeout=60,
     )
     if response.status_code >= 400:
         raise RuntimeError(
@@ -5839,13 +5899,14 @@ def _send_passwordless_login_otp(
         sentinel_context=header_builder,
     )
 
-    response = _session_request(
+    response = _protocol_request_with_transient_retry(
         session,
         "POST",
         PASSWORDLESS_SEND_OTP_URL,
         explicit_proxy=explicit_proxy,
         request_label="passwordless-login-send-otp",
         headers=req_headers,
+        timeout=45,
     )
     if response.status_code >= 400:
         raise RuntimeError(
