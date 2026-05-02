@@ -38,6 +38,12 @@ param(
     [string]$RepoArchiveUrl = "",
     [string]$RepoCacheRoot = "",
     [switch]$ForceRefreshRepo,
+    [string]$EasyBrowserRepoOwner = "aiaimimi0920",
+    [string]$EasyBrowserRepoRef = "main",
+    [ValidateSet("branch", "tag")]
+    [string]$EasyBrowserRepoRefKind = "branch",
+    [string]$EasyBrowserRepoArchiveUrl = "",
+    [string]$EasyBrowserRepoCacheRoot = "",
     [switch]$ResolveRepoOnly
 )
 
@@ -202,6 +208,24 @@ $repoRoot = $repoInfo.RepoRoot
 $resolvedConfigPath = Resolve-AbsolutePath -Path $ConfigPath -BaseDir $launcherRoot
 $configExamplePath = Resolve-AbsolutePath -Path "config.example.yaml" -BaseDir $repoRoot
 $deployScript = Resolve-AbsolutePath -Path "scripts\deploy-subproject.ps1" -BaseDir $repoRoot
+
+if ($Project -in @("isolated-instance", "build-provider-images", "publish-provider-images")) {
+    $resolvedEasyBrowserRepoRoot = $env:EASYBROWSER_REPO_ROOT
+    if ([string]::IsNullOrWhiteSpace($resolvedEasyBrowserRepoRoot)) {
+        $easyBrowserInfo = Ensure-RepoRoot `
+            -LauncherRoot $launcherRoot `
+            -Owner $EasyBrowserRepoOwner `
+            -Name "EasyBrowser" `
+            -Ref $EasyBrowserRepoRef `
+            -RefKind $EasyBrowserRepoRefKind `
+            -RequiredRelativePaths @("README.md", "runtimes\chrome", "deploy\service\base\Dockerfile") `
+            -ArchiveUrl $EasyBrowserRepoArchiveUrl `
+            -CacheRoot $EasyBrowserRepoCacheRoot `
+            -ForceRefresh:$ForceRefreshRepo
+        $resolvedEasyBrowserRepoRoot = $easyBrowserInfo.RepoRoot
+    }
+    $env:EASYBROWSER_REPO_ROOT = $resolvedEasyBrowserRepoRoot
+}
 
 if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
     Copy-Item -LiteralPath $configExamplePath -Destination $resolvedConfigPath
