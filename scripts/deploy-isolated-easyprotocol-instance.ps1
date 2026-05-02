@@ -3,6 +3,7 @@ param(
     [string]$ConfigPath = 'config.yaml',
     [int]$GatewayHostPort = 29789,
     [int]$PythonManagerHostPort = 29103,
+    [int]$PythonSlot = 1,
     [string]$InstanceRoot = '',
     [string]$RegisterOutputDirHost = '',
     [string]$RegisterTeamAuthDirHost = '',
@@ -187,6 +188,202 @@ function Resolve-ProviderPublishedImageName {
         }
 }
 
+function Format-ReplicaSuffix {
+    param(
+        [int]$Index
+    )
+
+    $safeIndex = [Math]::Max(1, [int]$Index)
+    return ('{0:000}' -f $safeIndex)
+}
+
+function Get-DefaultProviderEndpointHostPrefix {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Provider
+    )
+
+    switch ($Provider.ToLowerInvariant()) {
+        'python' { return 'easy-protocol-python' }
+        'go' { return 'easy-protocol-go' }
+        'javascript' { return 'easy-protocol-javascript' }
+        'rust' { return 'easy-protocol-rust' }
+        default { return "easy-protocol-$Provider" }
+    }
+}
+
+function Get-ProviderLocalImageName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Provider
+    )
+
+    switch ($Provider.ToLowerInvariant()) {
+        'python' { return 'easy-protocol/easy-protocol-python:local' }
+        'go' { return 'easy-protocol/easy-protocol-go:local' }
+        'javascript' { return 'easy-protocol/easy-protocol-javascript:local' }
+        'rust' { return 'easy-protocol/easy-protocol-rust:local' }
+        default { return "easy-protocol/easy-protocol-$Provider:local" }
+    }
+}
+
+function Resolve-ProviderRuntimeImage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Provider,
+        [Parameter(Mandatory = $true)]
+        $ProviderConfig,
+        [bool]$UseGhcrImages,
+        [string]$Registry,
+        [string]$GhcrOwner,
+        [string]$ProviderReleaseTag,
+        [string]$PythonProviderImageOverride
+    )
+
+    if ($Provider -eq 'python' -and -not [string]::IsNullOrWhiteSpace($PythonProviderImageOverride)) {
+        return $PythonProviderImageOverride
+    }
+
+    $configuredImage = if ($ProviderConfig.image) {
+        [string]$ProviderConfig.image
+    } else {
+        Get-ProviderLocalImageName -Provider $Provider
+    }
+
+    if (-not $UseGhcrImages) {
+        return $configuredImage
+    }
+
+    $imageName = Resolve-ProviderPublishedImageName -Provider $Provider -ConfiguredImage $configuredImage
+    return "$Registry/$GhcrOwner/${imageName}:$ProviderReleaseTag"
+}
+
+function Get-ProviderEnvMap {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ProviderConfig
+    )
+
+    $result = [ordered]@{}
+    $containerEnvironment = $ProviderConfig.containerEnvironment
+    if ($null -eq $containerEnvironment) {
+        return $result
+    }
+
+    foreach ($property in $containerEnvironment.PSObject.Properties) {
+        $result[[string]$property.Name] = [string]$property.Value
+    }
+
+    return $result
+}
+
+function Write-ProviderEnvFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$EnvMap
+    )
+
+    $lines = @()
+    foreach ($key in $EnvMap.Keys) {
+        $lines += "$key=$($EnvMap[$key])"
+    }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
+}
+
+function Get-EnabledProviderRuntimePlans {
+    param(
+        [Parameter(Mandatory = $true)]
+        $ProvidersConfig,
+        [bool]$UseGhcrImages,
+        [string]$Registry,
+        [string]$GhcrOwner,
+        [string]$ProviderReleaseTag,
+        [string]$PythonProviderImageOverride
+    )
+
+    $plans = @()
+
+    foreach ($providerProperty in $ProvidersConfig.PSObject.Properties) {
+        $providerKey = [string]$providerProperty.Name
+        $providerConfig = $providerProperty.Value
+        if ($null -eq $providerConfig) {
+            continue
+        }
+
+        $registryConfig = $providerConfig.registry
+        if ($null -eq $registryConfig) {
+            continue
+        }
+
+        $enabled = $true
+        if ($registryConfig.PSObject.Properties.Match('enabled').Count -gt 0) {
+            $enabled = [bool]$registryConfig.enabled
+        }
+        if (-not $enabled) {
+            continue
+        }
+
+        $replicaCount = 1
+        if ($registryConfig.PSObject.Properties.Match('replicas').Count -gt 0) {
+            try {
+                $replicaCount = [int]$registryConfig.replicas
+            } catch {
+                $replicaCount = 1
+            }
+        }
+        if ($replicaCount -lt 1) {
+            $replicaCount = 1
+        }
+
+        $port = 9100
+        if ($registryConfig.PSObject.Properties.Match('port').Count -gt 0) {
+            try {
+                $port = [int]$registryConfig.port
+            } catch {
+                $port = 9100
+            }
+        }
+
+        $endpointHostPrefix = ''
+        if ($registryConfig.PSObject.Properties.Match('endpointHostPrefix').Count -gt 0) {
+            $endpointHostPrefix = [string]$registryConfig.endpointHostPrefix
+        }
+        if ([string]::IsNullOrWhiteSpace($endpointHostPrefix)) {
+            $endpointHostPrefix = Get-DefaultProviderEndpointHostPrefix -Provider $providerKey
+        }
+
+        $image = Resolve-ProviderRuntimeImage `
+            -Provider $providerKey `
+            -ProviderConfig $providerConfig `
+            -UseGhcrImages $UseGhcrImages `
+            -Registry $Registry `
+            -GhcrOwner $GhcrOwner `
+            -ProviderReleaseTag $ProviderReleaseTag `
+            -PythonProviderImageOverride $PythonProviderImageOverride
+
+        $envMap = Get-ProviderEnvMap -ProviderConfig $providerConfig
+
+        for ($index = 1; $index -le $replicaCount; $index += 1) {
+            $suffix = Format-ReplicaSuffix -Index $index
+            $containerName = "$endpointHostPrefix-$suffix"
+            $plans += [pscustomobject]@{
+                providerKey    = $providerKey
+                replicaIndex   = $index
+                replicaSuffix  = $suffix
+                endpointAlias  = $containerName
+                containerName  = $containerName
+                image          = $image
+                port           = $port
+                envMap         = $envMap
+            }
+        }
+    }
+
+    return $plans
+}
+
 $repoRoot = Get-EasyProtocolRepoRoot
 $resolvedConfigPath = if ([System.IO.Path]::IsPathRooted($ConfigPath)) { $ConfigPath } else { Join-Path $repoRoot $ConfigPath }
 if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
@@ -204,6 +401,22 @@ $config = Read-EasyProtocolConfig -ConfigPath $resolvedConfigPath
 $pythonProvider = $config.providers.python
 if ($null -eq $pythonProvider) {
     throw 'Missing providers.python section in config.yaml.'
+}
+$providers = $config.providers
+$pythonRegistry = $pythonProvider.registry
+$pythonReplicaCount = 1
+if ($null -ne $pythonRegistry -and $pythonRegistry.PSObject.Properties.Match('replicas').Count -gt 0) {
+    try {
+        $pythonReplicaCount = [int]$pythonRegistry.replicas
+    } catch {
+        $pythonReplicaCount = 1
+    }
+}
+if ($pythonReplicaCount -lt 1) {
+    $pythonReplicaCount = 1
+}
+if ($PythonSlot -gt $pythonReplicaCount) {
+    throw "PythonSlot=$PythonSlot exceeds configured providers.python.registry.replicas=$pythonReplicaCount. Increase replicas first."
 }
 $ghcr = if ($config.publishing) { $config.publishing.ghcr } else { $null }
 $registry = if ($ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
@@ -229,7 +442,11 @@ if ($useGhcrImages) {
 
     if ([string]::IsNullOrWhiteSpace($ProviderImage)) {
         if ([string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
-            throw 'GHCR isolated deployment requires -ProviderImage or -ProviderReleaseTag.'
+            if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) {
+                $ProviderReleaseTag = $ReleaseTag
+            } else {
+                throw 'GHCR isolated deployment requires -ProviderImage or -ProviderReleaseTag.'
+            }
         }
         $ProviderImage = "$registry/$GhcrOwner/${providerImageName}:$ProviderReleaseTag"
     }
@@ -301,9 +518,26 @@ if ($useGhcrImages -and -not $SkipPull) {
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to pull isolated gateway image: $GatewayImage"
     }
-    docker pull $ProviderImage | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to pull isolated provider image: $ProviderImage"
+}
+
+$providerRuntimePlans = Get-EnabledProviderRuntimePlans `
+    -ProvidersConfig $providers `
+    -UseGhcrImages $useGhcrImages `
+    -Registry $registry `
+    -GhcrOwner $GhcrOwner `
+    -ProviderReleaseTag $ProviderReleaseTag `
+    -PythonProviderImageOverride $ProviderImage
+
+if ($providerRuntimePlans.Count -eq 0) {
+    throw 'No enabled provider runtime plans were generated from config.yaml.'
+}
+
+if ($useGhcrImages -and -not $SkipPull) {
+    foreach ($imageRef in ($providerRuntimePlans | ForEach-Object { $_.image } | Sort-Object -Unique)) {
+        docker pull $imageRef | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to pull isolated provider image: $imageRef"
+        }
     }
 }
 
@@ -312,9 +546,16 @@ Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
-$managerAlias = "easy-protocol-python-$InstanceName"
-$managerContainerName = "easy-protocol-python-$InstanceName"
-$gatewayContainerName = "easy-protocol-$InstanceName"
+$pythonReplicaSuffix = Format-ReplicaSuffix -Index $PythonSlot
+$pythonManagerPlan = $providerRuntimePlans | Where-Object {
+    $_.providerKey -eq 'python' -and $_.replicaSuffix -eq $pythonReplicaSuffix
+} | Select-Object -First 1
+if ($null -eq $pythonManagerPlan) {
+    throw "No python provider runtime plan matched PythonSlot=$PythonSlot"
+}
+$managerAlias = [string]$pythonManagerPlan.endpointAlias
+$managerContainerName = [string]$pythonManagerPlan.containerName
+$gatewayContainerName = "easy-protocol"
 
 $renderedGatewayConfigPath = Join-Path $repoRoot 'deploy/service/base/config/config.yaml'
 $gatewayConfigText = Get-Content -Raw -LiteralPath $renderedGatewayConfigPath
@@ -335,10 +576,12 @@ $existingContainers = @(docker ps -a --format '{{.Names}}')
 if ($LASTEXITCODE -ne 0) {
     throw "docker ps -a failed with exit code $LASTEXITCODE"
 }
-if ($existingContainers -contains $managerContainerName) {
-    docker rm -f $managerContainerName | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to remove existing container: $managerContainerName"
+foreach ($providerPlan in $providerRuntimePlans) {
+    if ($existingContainers -contains $providerPlan.containerName) {
+        docker rm -f $providerPlan.containerName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to remove existing container: $($providerPlan.containerName)"
+        }
     }
 }
 if ($existingContainers -contains $gatewayContainerName) {
@@ -348,25 +591,48 @@ if ($existingContainers -contains $gatewayContainerName) {
     }
 }
 
-docker run -d `
-    --name $managerContainerName `
-    --network EasyAiMi `
-    --network-alias $managerAlias `
-    --network-alias $managerContainerName `
-    -p "${PythonManagerHostPort}:9100" `
-    --env-file $envFile `
-    -v "${registerOutputDirHost}:/shared/register-output" `
-    -v "${registerTeamAuthDirHost}:/shared/team-auth:ro" `
-    -v "${registerTeamLocalDirHost}:/shared/local-team-store" `
-    $(if ($useGhcrImages) { $ProviderImage } else { 'easy-protocol/easy-protocol-python:local' }) | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to start isolated python manager container"
+foreach ($providerPlan in $providerRuntimePlans) {
+    $providerEnvFile = if ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix) {
+        $envFile
+    } else {
+        Join-Path $instanceRoot ("$($providerPlan.containerName).env")
+    }
+
+    if (-not ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix)) {
+        Write-ProviderEnvFile -Path $providerEnvFile -EnvMap $providerPlan.envMap
+    }
+
+    $dockerArgs = @(
+        'run', '-d',
+        '--name', [string]$providerPlan.containerName,
+        '--network', 'EasyAiMi',
+        '--network-alias', [string]$providerPlan.endpointAlias,
+        '--network-alias', [string]$providerPlan.containerName
+    )
+
+    if ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix) {
+        $dockerArgs += @('-p', "${PythonManagerHostPort}:9100")
+    }
+
+    $dockerArgs += @('--env-file', $providerEnvFile)
+
+    if ($providerPlan.providerKey -eq 'python') {
+        $dockerArgs += @('-v', "${registerOutputDirHost}:/shared/register-output")
+        $dockerArgs += @('-v', "${registerTeamAuthDirHost}:/shared/team-auth:ro")
+        $dockerArgs += @('-v', "${registerTeamLocalDirHost}:/shared/local-team-store")
+    }
+
+    $dockerArgs += [string]$providerPlan.image
+    docker @dockerArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to start isolated provider container: $($providerPlan.containerName)"
+    }
 }
 
 docker run -d `
     --name $gatewayContainerName `
     --network EasyAiMi `
-    --network-alias "easy-protocol-$InstanceName" `
+    --network-alias "easy-protocol" `
     --network-alias $gatewayContainerName `
     -p "${GatewayHostPort}:9788" `
     -e EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml `
@@ -433,6 +699,7 @@ if ($null -eq $managerPool) {
     registerTeamLocalDirHost = $registerTeamLocalDirHost
     managerAlias          = $managerAlias
     managerContainerName  = $managerContainerName
+    providerContainers    = @($providerRuntimePlans | ForEach-Object { $_.containerName })
     managerBaseUrl        = $managerBaseUrl
     gatewayContainerName  = $gatewayContainerName
     gatewayBaseUrl        = $gatewayBaseUrl

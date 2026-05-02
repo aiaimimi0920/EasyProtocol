@@ -32,11 +32,19 @@ Future deploy changes must preserve this contract.
 ## Canonical Docker Naming
 
 This repo must keep the short slug `easy-protocol` as the operator-facing
-default for the gateway, and `easy-protocol-python` for the default Python
-provider sidecar. At minimum preserve:
+default for the gateway, and numbered provider child containers such as
+`easy-protocol-python-001` for runtime sidecars. At minimum preserve:
 
 - gateway compose project name `easy-protocol`
 - gateway default container name `easy-protocol`
 - gateway default network alias `easy-protocol`
 - gateway default local image name `easy-protocol/easy-protocol:local`
-- python provider default container and alias prefix `easy-protocol-python`
+- python provider default container and alias prefix `easy-protocol-python-`
+- numbered provider container suffixes with at least three digits, such as
+  `001`
+
+The canonical runtime shape must remain:
+
+- one outward-facing gateway container named `easy-protocol`
+- provider child containers derived from the enabled registry config, such as
+  `easy-protocol-python-001` or `easy-protocol-rust-001`

@@ -36,7 +36,7 @@ x-python-protocol-common: &python-protocol-common
   networks:
     Easy:
       aliases:
-        - easy-protocol-python
+        - easy-protocol-python-001
 
 services:
   easy-email:
@@ -90,15 +90,15 @@ services:
         aliases:
           - easy-proxy
 
-  easy-protocol-python:
+  easy-protocol-python-001:
     <<: *python-protocol-common
-    container_name: easy-protocol-python
+    container_name: easy-protocol-python-001
     ports:
       - "${PYTHON_PROTOCOL_MANAGER_HOST_PORT:-11003}:9100"
     networks:
       Easy:
         aliases:
-          - easy-protocol-python
+          - easy-protocol-python-001
 
   easy-protocol:
     build:
@@ -108,7 +108,7 @@ services:
     container_name: easy-protocol
     restart: unless-stopped
     depends_on:
-      - easy-protocol-python
+      - easy-protocol-python-001
     ports:
       - "${EASY_PROTOCOL_GATEWAY_HOST_PORT:-19788}:9788"
     environment:

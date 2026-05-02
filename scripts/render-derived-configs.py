@@ -62,50 +62,101 @@ def get_dict(mapping: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _normalize_replica_count(value: Any, *, default: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(0, parsed)
+
+
+def _replica_suffix(index: int, count: int) -> str:
+    width = max(3, len(str(max(1, count))))
+    return f"{index:0{width}d}"
+
+
+def _generate_registry_service_entries(
+    *,
+    registry: dict[str, Any],
+    default_name: str,
+    default_language: str,
+    default_endpoint_host: str,
+) -> list[dict[str, Any]]:
+    if not registry.get("enabled", True):
+        return []
+
+    language = str(registry.get("language") or default_language).strip() or default_language
+    service_name = str(registry.get("name") or default_name).strip() or default_name
+    service_name_prefix = str(
+        registry.get("serviceNamePrefix")
+        or registry.get("namePrefix")
+        or service_name
+    ).strip() or service_name
+    endpoint_host = str(registry.get("endpointHost") or default_endpoint_host).strip() or default_endpoint_host
+    endpoint_host_prefix = str(registry.get("endpointHostPrefix") or "").strip()
+    port = int(registry.get("port", 9100) or 9100)
+    supported_operations = list(registry.get("supportedOperations") or [])
+    replicas = _normalize_replica_count(
+        registry.get("replicas"),
+        default=1 if endpoint_host_prefix else 0,
+    )
+
+    if endpoint_host_prefix:
+        replica_count = max(1, replicas)
+        return [
+            {
+                "name": f"{service_name_prefix}-{_replica_suffix(index, replica_count)}",
+                "language": language,
+                "endpoint": f"http://{endpoint_host_prefix}-{_replica_suffix(index, replica_count)}:{port}",
+                "enabled": True,
+                "supported_operations": supported_operations,
+            }
+            for index in range(1, replica_count + 1)
+        ]
+
+    return [
+        {
+            "name": service_name,
+            "language": language,
+            "endpoint": f"http://{endpoint_host}:{port}",
+            "enabled": True,
+            "supported_operations": supported_operations,
+        }
+    ]
+
+
 def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, Any]]:
     providers = get_dict(root_config, "providers")
     services: list[dict[str, Any]] = []
 
     python_provider = get_dict(providers, "python")
     python_registry = get_dict(python_provider, "registry")
-    if python_registry.get("enabled", True):
-        name = str(python_registry.get("name") or "PythonProtocol").strip()
-        endpoint_host = str(python_registry.get("endpointHost") or "easy-protocol-python").strip()
-        port = int(python_registry.get("port", 9100) or 9100)
-        supported_operations = list(python_registry.get("supportedOperations") or [])
-        services.append(
-            {
-                "name": name,
-                "language": str(python_registry.get("language") or "python"),
-                "endpoint": f"http://{endpoint_host}:{port}",
-                "enabled": True,
-                "supported_operations": supported_operations,
-            }
+    services.extend(
+        _generate_registry_service_entries(
+            registry=python_registry,
+            default_name="PythonProtocol",
+            default_language="python",
+            default_endpoint_host="easy-protocol-python-001",
         )
+    )
 
     for provider_key, defaults in (
-        ("go", ("GolangProtocol", "go", "easy-protocol-go")),
-        ("javascript", ("JSProtocol", "javascript", "easy-protocol-javascript")),
-        ("rust", ("RustProtocol", "rust", "easy-protocol-rust")),
+        ("go", ("GolangProtocol", "go", "easy-protocol-go-001")),
+        ("javascript", ("JSProtocol", "javascript", "easy-protocol-javascript-001")),
+        ("rust", ("RustProtocol", "rust", "easy-protocol-rust-001")),
     ):
         provider = get_dict(providers, provider_key)
         registry = get_dict(provider, "registry")
-        if not registry or not registry.get("enabled", True):
+        if not registry:
             continue
         name_default, language_default, endpoint_host_default = defaults
-        name = str(registry.get("name") or name_default).strip()
-        language = str(registry.get("language") or language_default).strip()
-        endpoint_host = str(registry.get("endpointHost") or endpoint_host_default).strip()
-        port = int(registry.get("port", 9100) or 9100)
-        supported_operations = list(registry.get("supportedOperations") or [])
-        services.append(
-            {
-                "name": name,
-                "language": language,
-                "endpoint": f"http://{endpoint_host}:{port}",
-                "enabled": True,
-                "supported_operations": supported_operations,
-            }
+        services.extend(
+            _generate_registry_service_entries(
+                registry=registry,
+                default_name=name_default,
+                default_language=language_default,
+                default_endpoint_host=endpoint_host_default,
+            )
         )
 
     return services

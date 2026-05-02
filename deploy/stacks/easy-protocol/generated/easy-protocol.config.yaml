@@ -47,24 +47,9 @@ persistence:
   audit_history_limit: 500
   snapshot_limit: 200
 services:
-- name: PythonProtocol
+- name: PythonProtocol-001
   language: python
-  endpoint: http://python-protocol-manager:9100
+  endpoint: http://easy-protocol-python-001:9100
   enabled: true
   supported_operations:
   - codex.semantic.step
-- name: GolangProtocol
-  language: go
-  endpoint: http://golang-protocol-service:9100
-  enabled: true
-  supported_operations: []
-- name: JSProtocol
-  language: javascript
-  endpoint: http://js-protocol-service:9100
-  enabled: true
-  supported_operations: []
-- name: RustProtocol
-  language: rust
-  endpoint: http://rust-protocol-service:9100
-  enabled: true
-  supported_operations: []

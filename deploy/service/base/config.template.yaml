@@ -55,24 +55,24 @@ persistence:
   snapshot_limit: 200
 
 services:
-  - name: PythonProtocol
+  - name: PythonProtocol-001
     language: python
-    endpoint: http://easy-protocol-python:9100
+    endpoint: http://easy-protocol-python-001:9100
     enabled: true
     supported_operations:
       - codex.semantic.step
-  - name: GolangProtocol
+  - name: GolangProtocol-001
     language: go
-    endpoint: http://easy-protocol-go:9100
+    endpoint: http://easy-protocol-go-001:9100
     enabled: true
     supported_operations: []
-  - name: JSProtocol
+  - name: JSProtocol-001
     language: javascript
-    endpoint: http://easy-protocol-javascript:9100
+    endpoint: http://easy-protocol-javascript-001:9100
     enabled: true
     supported_operations: []
-  - name: RustProtocol
+  - name: RustProtocol-001
     language: rust
-    endpoint: http://easy-protocol-rust:9100
+    endpoint: http://easy-protocol-rust-001:9100
     enabled: true
     supported_operations: []

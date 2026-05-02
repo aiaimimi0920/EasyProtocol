@@ -26,6 +26,7 @@ param(
     [string]$InstanceName = 'dyn01',
     [int]$GatewayHostPort = 29789,
     [int]$PythonManagerHostPort = 29103,
+    [int]$PythonSlot = 1,
     [string]$GhcrOwner = '',
     [string]$Image = '',
     [string]$ProviderImage = '',
@@ -137,7 +138,8 @@ switch ($Project) {
             '-InstanceName', $InstanceName,
             '-ConfigPath', $resolvedConfigPath,
             '-GatewayHostPort', [string]$GatewayHostPort,
-            '-PythonManagerHostPort', [string]$PythonManagerHostPort
+            '-PythonManagerHostPort', [string]$PythonManagerHostPort,
+            '-PythonSlot', [string]$PythonSlot
         )
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
@@ -153,6 +155,7 @@ switch ($Project) {
             '-ConfigPath', $resolvedConfigPath,
             '-GatewayHostPort', [string]$GatewayHostPort,
             '-PythonManagerHostPort', [string]$PythonManagerHostPort,
+            '-PythonSlot', [string]$PythonSlot,
             '-NoBuild'
         )
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }

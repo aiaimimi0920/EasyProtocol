@@ -90,20 +90,20 @@ persistence:
   snapshot_limit: 200
 
 services:
-  - name: GolangProtocol
+  - name: GolangProtocol-001
     language: go
     enabled: true
-    endpoint: http://127.0.0.1:11001
+    endpoint: http://easy-protocol-go-001:9100
     supported_operations:
       - health.inspect
       - protocol.echo
       - protocol.headers.normalize
       - protocol.query.encode
       - protocol.hash.sha256
-  - name: JSProtocol
+  - name: JSProtocol-001
     language: javascript
     enabled: true
-    endpoint: http://127.0.0.1:11002
+    endpoint: http://easy-protocol-javascript-001:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -111,10 +111,10 @@ services:
       - protocol.json.compact
       - protocol.query.encode
       - protocol.regex.extract
-  - name: PythonProtocol-01
+  - name: PythonProtocol-001
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-01:9100
+    endpoint: http://easy-protocol-python-001:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -122,10 +122,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-02
+  - name: PythonProtocol-002
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-02:9100
+    endpoint: http://easy-protocol-python-002:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -133,10 +133,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-03
+  - name: PythonProtocol-003
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-03:9100
+    endpoint: http://easy-protocol-python-003:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -144,10 +144,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-04
+  - name: PythonProtocol-004
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-04:9100
+    endpoint: http://easy-protocol-python-004:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -155,10 +155,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-05
+  - name: PythonProtocol-005
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-05:9100
+    endpoint: http://easy-protocol-python-005:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -166,10 +166,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-06
+  - name: PythonProtocol-006
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-06:9100
+    endpoint: http://easy-protocol-python-006:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -177,10 +177,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-07
+  - name: PythonProtocol-007
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-07:9100
+    endpoint: http://easy-protocol-python-007:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -188,10 +188,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-08
+  - name: PythonProtocol-008
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-08:9100
+    endpoint: http://easy-protocol-python-008:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -199,10 +199,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-09
+  - name: PythonProtocol-009
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-09:9100
+    endpoint: http://easy-protocol-python-009:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -210,10 +210,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-10
+  - name: PythonProtocol-010
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-10:9100
+    endpoint: http://easy-protocol-python-010:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -221,10 +221,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-11
+  - name: PythonProtocol-011
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-11:9100
+    endpoint: http://easy-protocol-python-011:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -232,10 +232,10 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: PythonProtocol-12
+  - name: PythonProtocol-012
     language: python
     enabled: true
-    endpoint: http://python-protocol-service-12:9100
+    endpoint: http://easy-protocol-python-012:9100
     supported_operations:
       - health.inspect
       - protocol.echo
@@ -243,13 +243,14 @@ services:
       - protocol.text.slugify
       - protocol.data.flatten
       - codex.semantic.step
-  - name: RustProtocol
+  - name: RustProtocol-001
     language: rust
     enabled: true
-    endpoint: http://127.0.0.1:11004
+    endpoint: http://easy-protocol-rust-001:9100
     supported_operations:
       - health.inspect
       - protocol.echo
       - protocol.hash.sha256
       - protocol.bytes.hex
       - protocol.bytes.xor
+

@@ -1,6 +1,6 @@
-﻿# RustProtocol Deploy Workspace
+# RustProtocol Deploy Workspace
 
-- image role: `rust-protocol-service`
+- image role: `easy-protocol-rust`
 - default listen: `0.0.0.0:9100`
 - upstream env: `RUST_PROTOCOL_UPSTREAM_BASE_URL`
 

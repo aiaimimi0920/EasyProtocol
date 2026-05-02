@@ -1,6 +1,6 @@
-﻿# GolangProtocol Deploy Workspace
+# GolangProtocol Deploy Workspace
 
-- image role: `golang-protocol-service`
+- image role: `easy-protocol-go`
 - default listen: `0.0.0.0:9100`
 - upstream env: `GOLANG_PROTOCOL_UPSTREAM_BASE_URL`
 

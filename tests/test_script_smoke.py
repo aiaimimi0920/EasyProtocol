@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -173,6 +174,44 @@ class ScriptSmokeTests(unittest.TestCase):
 
         for token in required_tokens:
             self.assertIn(token, content)
+
+    def test_root_deploy_host_defaults_to_isolated_instance_ghcr(self):
+        content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
+        self.assertIn('[string]$Project = "isolated-instance-ghcr"', content)
+
+    def test_render_derived_configs_expands_numbered_provider_hosts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root_config = Path(temp_dir) / "config.yaml"
+            temp_service_output = Path(temp_dir) / "service-config.yaml"
+            payload = yaml.safe_load((REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+            payload["providers"]["go"]["registry"]["enabled"] = True
+            payload["providers"]["javascript"]["registry"]["enabled"] = True
+            payload["providers"]["rust"]["registry"]["enabled"] = True
+            temp_root_config.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "render-derived-configs.py"),
+                    "--root-config",
+                    str(temp_root_config),
+                    "--service-output",
+                    str(temp_service_output),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            rendered = yaml.safe_load(temp_service_output.read_text(encoding="utf-8"))
+            services = rendered.get("services") or []
+            endpoints = {entry.get("name"): entry.get("endpoint") for entry in services if isinstance(entry, dict)}
+            self.assertEqual(endpoints.get("PythonProtocol-001"), "http://easy-protocol-python-001:9100")
+            self.assertEqual(endpoints.get("GolangProtocol-001"), "http://easy-protocol-go-001:9100")
+            self.assertEqual(endpoints.get("JSProtocol-001"), "http://easy-protocol-javascript-001:9100")
+            self.assertEqual(endpoints.get("RustProtocol-001"), "http://easy-protocol-rust-001:9100")
 
 
 if __name__ == "__main__":

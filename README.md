@@ -67,8 +67,9 @@ The Python provider currently owns the hottest business path. The other
 providers keep their language-local operations and can also act as adapters
 around the Python runtime for selected `codex.*` flows.
 
-The Python side is now intended to run as a single provider manager endpoint
-that fans out real work into a dynamic subprocess pool with:
+The Python side is now intended to run behind numbered provider child
+containers such as `easy-protocol-python-001`. Each child may still fan out
+real work into a dynamic subprocess pool with:
 
 - minimum warm workers
 - bounded maximum workers
@@ -126,9 +127,21 @@ The canonical local Docker rollout for the public repository is:
 - a root PowerShell script pulls the tagged GHCR image and deploys the gateway
   container into Docker
 
-This GHCR deploy path covers the `service/base` gateway container. It expects
-the target host to have access to any provider runtimes or upstream services
-the rendered gateway config points at.
+This GHCR deploy path now treats `easy-protocol` as the canonical outward
+compose/runtime name. The gateway container stays:
+
+- `easy-protocol`
+
+and provider sidecars are expected to follow numbered child names such as:
+
+- `easy-protocol-python-001`
+- `easy-protocol-rust-001`
+
+The root deploy path is therefore no longer just "gateway-only". It is
+expected to bring up the gateway and the default provider child runtime needed
+by the rendered config. In the current default operator config, that means the
+Python child runtime is enabled by default; other provider families stay
+available but disabled until the operator explicitly turns them on.
 
 Prerequisites:
 
@@ -193,18 +206,16 @@ You can also pin the full image reference directly:
 
 What the root deploy script does:
 
-- renders `deploy/service/base/config/config.yaml`
-- renders `deploy/service/base/config/runtime.env`
+- renders the gateway config from the root operator config
 - ensures the external Docker network exists
-- pulls the requested GHCR image unless `-SkipPull` was passed
-- writes the runtime `.env` used by `deploy/service/base/docker-compose.yaml`
-- replaces the existing `easyprotocol-service-base` container if one already exists
-- runs Docker Compose to bring the gateway back up
+- pulls the requested gateway and provider images unless `-SkipPull` was passed
+- brings up the canonical gateway container `easy-protocol`
+- derives numbered provider child containers such as `easy-protocol-python-001`
 
 Recommended post-deploy checks:
 
 ```powershell
-docker ps --filter "name=easyprotocol-service-base"
+docker ps --filter "name=easy-protocol"
 
 Invoke-RestMethod -Uri "http://127.0.0.1:19788/health" -Method Get
 ```
@@ -232,3 +243,4 @@ See `docs/migration-plan.md` for the source-to-target mapping.
 - `docs/easyprotocol-release-workflow.md`
 - `docs/python-protocol-manager-runtime-pool.md`
 - `docs/root-host-deploy-standard.md`
+

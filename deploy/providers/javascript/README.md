@@ -1,6 +1,6 @@
-﻿# JSProtocol Deploy Workspace
+# JSProtocol Deploy Workspace
 
-- image role: `js-protocol-service`
+- image role: `easy-protocol-javascript`
 - default listen: `0.0.0.0:9100`
 - upstream env: `JS_PROTOCOL_UPSTREAM_BASE_URL`
 
