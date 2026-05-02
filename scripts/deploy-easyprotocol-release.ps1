@@ -22,7 +22,7 @@ $publishing = $config.publishing
 $ghcr = if ($null -ne $publishing) { $publishing.ghcr } else { $null }
 $registry = if ($null -ne $ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
 $owner = if ($null -ne $ghcr -and $ghcr.owner) { [string]$ghcr.owner } else { '' }
-$configuredImage = if ($serviceBase.image) { [string]$serviceBase.image } else { 'easyprotocol/easy-protocol-service:local' }
+$configuredImage = if ($serviceBase.image) { [string]$serviceBase.image } else { 'easy-protocol/easy-protocol:local' }
 
 if ([string]::IsNullOrWhiteSpace($owner)) {
     $imageRef = $configuredImage
@@ -61,4 +61,3 @@ if ($Push) {
 }
 
 Write-Host "EasyProtocol release flow finished: $imageRef" -ForegroundColor Green
-

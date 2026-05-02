@@ -70,7 +70,7 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
     python_registry = get_dict(python_provider, "registry")
     if python_registry.get("enabled", True):
         name = str(python_registry.get("name") or "PythonProtocol").strip()
-        endpoint_host = str(python_registry.get("endpointHost") or "python-protocol-manager").strip()
+        endpoint_host = str(python_registry.get("endpointHost") or "easy-protocol-python").strip()
         port = int(python_registry.get("port", 9100) or 9100)
         supported_operations = list(python_registry.get("supportedOperations") or [])
         services.append(
@@ -84,9 +84,9 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
         )
 
     for provider_key, defaults in (
-        ("go", ("GolangProtocol", "go", "golang-protocol-service")),
-        ("javascript", ("JSProtocol", "javascript", "js-protocol-service")),
-        ("rust", ("RustProtocol", "rust", "rust-protocol-service")),
+        ("go", ("GolangProtocol", "go", "easy-protocol-go")),
+        ("javascript", ("JSProtocol", "javascript", "easy-protocol-javascript")),
+        ("rust", ("RustProtocol", "rust", "easy-protocol-rust")),
     ):
         provider = get_dict(providers, provider_key)
         registry = get_dict(provider, "registry")

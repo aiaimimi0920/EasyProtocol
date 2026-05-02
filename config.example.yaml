@@ -7,7 +7,7 @@
 serviceBase:
   context: .
   dockerfile: deploy/service/base/Dockerfile
-  image: easyprotocol/easy-protocol-service:local
+  image: easy-protocol/easy-protocol:local
   runtime:
     mode: strategy
     log_level: info
@@ -60,13 +60,13 @@ serviceBase:
 
 providers:
   python:
-    image: easyprotocol/python-protocol-service:local
+    image: easy-protocol/easy-protocol-python:local
     dockerfile: deploy/providers/python/Dockerfile
     registry:
       enabled: true
       name: PythonProtocol
       language: python
-      endpointHost: python-protocol-manager
+      endpointHost: easy-protocol-python
       port: 9100
       supportedOperations:
         - codex.semantic.step
@@ -81,11 +81,11 @@ providers:
       PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS: "60"
       PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER: "50"
       PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS: "5"
-      MAILBOX_SERVICE_BASE_URL: http://easy-email-service:8080
+      MAILBOX_SERVICE_BASE_URL: http://easy-email:8080
       MAILBOX_SERVICE_API_KEY: ""
-      CAPTCHA_SERVICE_BASE_URL: http://easybrowser-service:18080
+      CAPTCHA_SERVICE_BASE_URL: http://easy-browser:18080
       MAILBOX_SERVICE_REQUEST_ATTEMPTS: "8"
-      EASY_PROXY_BASE_URL: http://easy-proxy-service:29888
+      EASY_PROXY_BASE_URL: http://easy-proxy:29888
       EASY_PROXY_API_KEY: ""
       REGISTER_ENABLE_EASY_PROXY: "true"
       REGISTER_REQUIRE_EASY_PROXY: "true"
@@ -107,43 +107,43 @@ providers:
       registerTeamLocalDirHost: C:/Users/Public/.cli-proxy-api/team
 
   go:
-    image: easyprotocol/golang-protocol-service:local
+    image: easy-protocol/easy-protocol-go:local
     dockerfile: deploy/providers/go/Dockerfile
     registry:
       enabled: true
       name: GolangProtocol
       language: go
-      endpointHost: golang-protocol-service
+      endpointHost: easy-protocol-go
       port: 9100
       supportedOperations: []
     containerEnvironment:
-      GOLANG_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+      GOLANG_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python:9100
 
   javascript:
-    image: easyprotocol/js-protocol-service:local
+    image: easy-protocol/easy-protocol-javascript:local
     dockerfile: deploy/providers/javascript/Dockerfile
     registry:
       enabled: true
       name: JSProtocol
       language: javascript
-      endpointHost: js-protocol-service
+      endpointHost: easy-protocol-javascript
       port: 9100
       supportedOperations: []
     containerEnvironment:
-      JS_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+      JS_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python:9100
 
   rust:
-    image: easyprotocol/rust-protocol-service:local
+    image: easy-protocol/easy-protocol-rust:local
     dockerfile: deploy/providers/rust/Dockerfile
     registry:
       enabled: true
       name: RustProtocol
       language: rust
-      endpointHost: rust-protocol-service
+      endpointHost: easy-protocol-rust
       port: 9100
       supportedOperations: []
     containerEnvironment:
-      RUST_PROTOCOL_UPSTREAM_BASE_URL: http://python-protocol-manager:9100
+      RUST_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python:9100
 
 stack:
   easyProtocol:
@@ -157,13 +157,13 @@ stack:
     externalDependencies:
       easyEmail:
         enabled: true
-        baseUrl: http://easy-email-service:8080
+        baseUrl: http://easy-email:8080
         apiKey: ""
         resetStoreOnBoot: false
         m2uEasyProxyMaxAttempts: 10
       easyProxy:
         enabled: true
-        baseUrl: http://easy-proxy-service:29888
+        baseUrl: http://easy-proxy:29888
         apiKey: ""
 
 publishing:

@@ -1,10 +1,10 @@
 services:
-  easy-protocol-service:
+  easy-protocol:
     build:
       context: ../../..
       dockerfile: deploy/service/base/Dockerfile
-    image: ${EASY_PROTOCOL_SERVICE_IMAGE:-easyprotocol/easy-protocol-service:local}
-    container_name: ${EASY_PROTOCOL_SERVICE_CONTAINER_NAME:-easyprotocol-service-base}
+    image: ${EASY_PROTOCOL_SERVICE_IMAGE:-easy-protocol/easy-protocol:local}
+    container_name: ${EASY_PROTOCOL_SERVICE_CONTAINER_NAME:-easy-protocol}
     restart: unless-stopped
     ports:
       - "${EASY_PROTOCOL_SERVICE_HOST_PORT:-19788}:9788"
@@ -20,7 +20,7 @@ services:
     networks:
       easyprotocol_service_network:
         aliases:
-          - ${EASY_PROTOCOL_SERVICE_NETWORK_ALIAS:-easy-protocol-service}
+          - ${EASY_PROTOCOL_SERVICE_NETWORK_ALIAS:-easy-protocol}
 
 networks:
   easyprotocol_service_network:

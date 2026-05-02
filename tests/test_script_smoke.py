@@ -103,7 +103,7 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertTrue(record["FilePath"].lower().endswith("deploy-ghcr-easy-protocol-service.ps1"))
             args = record["Arguments"]
             self.assertIn("-Image", args)
-            self.assertIn("ghcr.io/test-owner/easy-protocol-service:smoke-release", args)
+            self.assertIn("ghcr.io/test-owner/easy-protocol:smoke-release", args)
             self.assertIn("-ConfigPath", args)
             self.assertIn(str(rendered_config), args)
             self.assertIn("-RuntimeEnvPath", args)

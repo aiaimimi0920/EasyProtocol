@@ -18,7 +18,7 @@ if ($null -eq $serviceBase) {
 $repoRoot = Get-EasyProtocolRepoRoot
 $contextRelative = if ($serviceBase.context) { [string]$serviceBase.context } else { '.' }
 $dockerfileRelative = if ($serviceBase.dockerfile) { [string]$serviceBase.dockerfile } else { 'deploy/service/base/Dockerfile' }
-$configuredImage = if ($serviceBase.image) { [string]$serviceBase.image } else { 'easyprotocol/easy-protocol-service:local' }
+$configuredImage = if ($serviceBase.image) { [string]$serviceBase.image } else { 'easy-protocol/easy-protocol:local' }
 
 $contextPath = Join-Path $repoRoot $contextRelative
 $dockerfilePath = Join-Path $repoRoot $dockerfileRelative
@@ -31,4 +31,3 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Built image: $imageRef" -ForegroundColor Green
-

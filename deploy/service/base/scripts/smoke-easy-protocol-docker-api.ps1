@@ -1,5 +1,5 @@
 param(
-  [string]$Image = 'easyprotocol/easy-protocol-service:local',
+[string]$Image = 'easy-protocol/easy-protocol:local',
   [string]$ConfigPath = 'deploy/service/base/config/config.yaml',
   [int]$HostPort = 0
 )

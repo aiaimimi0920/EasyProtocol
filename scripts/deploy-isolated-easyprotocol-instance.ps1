@@ -178,13 +178,13 @@ function Resolve-ProviderPublishedImageName {
         }
     }
 
-    switch ($Provider.ToLowerInvariant()) {
-        'python' { return 'easy-protocol-python-service' }
-        'go' { return 'easy-protocol-go-service' }
-        'javascript' { return 'easy-protocol-javascript-service' }
-        'rust' { return 'easy-protocol-rust-service' }
-        default { return "$Provider-protocol-service" }
-    }
+        switch ($Provider.ToLowerInvariant()) {
+            'python' { return 'easy-protocol-python' }
+            'go' { return 'easy-protocol-go' }
+            'javascript' { return 'easy-protocol-javascript' }
+            'rust' { return 'easy-protocol-rust' }
+            default { return "easy-protocol-$Provider" }
+        }
 }
 
 $repoRoot = Get-EasyProtocolRepoRoot
@@ -207,10 +207,10 @@ if ($null -eq $pythonProvider) {
 }
 $ghcr = if ($config.publishing) { $config.publishing.ghcr } else { $null }
 $registry = if ($ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
-$configuredGatewayImage = if ($config.serviceBase -and $config.serviceBase.image) { [string]$config.serviceBase.image } else { 'easyprotocol/easy-protocol-service:local' }
-$configuredProviderImage = if ($pythonProvider.image) { [string]$pythonProvider.image } else { 'easyprotocol/python-protocol-service:local' }
+$configuredGatewayImage = if ($config.serviceBase -and $config.serviceBase.image) { [string]$config.serviceBase.image } else { 'easy-protocol/easy-protocol:local' }
+$configuredProviderImage = if ($pythonProvider.image) { [string]$pythonProvider.image } else { 'easy-protocol/easy-protocol-python:local' }
 $gatewayImageName = [string]($configuredGatewayImage -replace '^.+/', '' -replace ':.+$', '')
-if ([string]::IsNullOrWhiteSpace($gatewayImageName)) { $gatewayImageName = 'easy-protocol-service' }
+if ([string]::IsNullOrWhiteSpace($gatewayImageName)) { $gatewayImageName = 'easy-protocol' }
 $providerImageName = Resolve-ProviderPublishedImageName -Provider 'python' -ConfiguredImage $configuredProviderImage
 $useGhcrImages = (-not [string]::IsNullOrWhiteSpace($GatewayImage)) -or (-not [string]::IsNullOrWhiteSpace($ProviderImage)) -or (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) -or (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag))
 
@@ -312,13 +312,14 @@ Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 
-$managerAlias = "python-protocol-manager-$InstanceName"
-$managerContainerName = "easyprotocol-python-manager-$InstanceName"
-$gatewayContainerName = "easyprotocol-service-$InstanceName"
+$managerAlias = "easy-protocol-python-$InstanceName"
+$managerContainerName = "easy-protocol-python-$InstanceName"
+$gatewayContainerName = "easy-protocol-$InstanceName"
 
 $renderedGatewayConfigPath = Join-Path $repoRoot 'deploy/service/base/config/config.yaml'
 $gatewayConfigText = Get-Content -Raw -LiteralPath $renderedGatewayConfigPath
 $gatewayConfigText = $gatewayConfigText -replace 'http://python-protocol-manager:9100', "http://$managerAlias`:9100"
+$gatewayConfigText = $gatewayConfigText -replace 'http://easy-protocol-python:9100', "http://$managerAlias`:9100"
 Set-Content -LiteralPath $gatewayConfigPath -Value $gatewayConfigText -Encoding UTF8
 
 $renderedEnvPath = Join-Path $repoRoot 'deploy/stacks/easy-protocol/generated/stack.env'
@@ -357,7 +358,7 @@ docker run -d `
     -v "${registerOutputDirHost}:/shared/register-output" `
     -v "${registerTeamAuthDirHost}:/shared/team-auth:ro" `
     -v "${registerTeamLocalDirHost}:/shared/local-team-store" `
-    $(if ($useGhcrImages) { $ProviderImage } else { 'easyprotocol/python-protocol-service:local' }) | Out-Null
+    $(if ($useGhcrImages) { $ProviderImage } else { 'easy-protocol/easy-protocol-python:local' }) | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to start isolated python manager container"
 }
@@ -365,7 +366,7 @@ if ($LASTEXITCODE -ne 0) {
 docker run -d `
     --name $gatewayContainerName `
     --network EasyAiMi `
-    --network-alias "easy-protocol-service-$InstanceName" `
+    --network-alias "easy-protocol-$InstanceName" `
     --network-alias $gatewayContainerName `
     -p "${GatewayHostPort}:9788" `
     -e EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml `
@@ -373,7 +374,7 @@ docker run -d `
     -e EASY_PROTOCOL_RESET_STORE_ON_BOOT=false `
     -v "${configDir}:/etc/easy-protocol" `
     -v "${dataDir}:/var/lib/easy-protocol" `
-    $(if ($useGhcrImages) { $GatewayImage } else { 'easyprotocol/easy-protocol-service:local' }) | Out-Null
+    $(if ($useGhcrImages) { $GatewayImage } else { 'easy-protocol/easy-protocol:local' }) | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to start isolated easyprotocol gateway container"
 }

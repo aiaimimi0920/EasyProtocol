@@ -28,3 +28,15 @@ The contract for that file is:
    without launching the full runtime.
 
 Future deploy changes must preserve this contract.
+
+## Canonical Docker Naming
+
+This repo must keep the short slug `easy-protocol` as the operator-facing
+default for the gateway, and `easy-protocol-python` for the default Python
+provider sidecar. At minimum preserve:
+
+- gateway compose project name `easy-protocol`
+- gateway default container name `easy-protocol`
+- gateway default network alias `easy-protocol`
+- gateway default local image name `easy-protocol/easy-protocol:local`
+- python provider default container and alias prefix `easy-protocol-python`

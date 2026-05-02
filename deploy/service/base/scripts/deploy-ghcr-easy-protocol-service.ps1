@@ -15,7 +15,11 @@ param(
 
     [string]$ComposeSourcePath = '',
 
-    [string]$ContainerName = 'easyprotocol-service-base',
+    [string]$ContainerName = 'easy-protocol',
+
+    [string]$NetworkAlias = 'easy-protocol',
+
+    [string]$ComposeProjectName = 'easy-protocol',
 
     [switch]$SkipPull
 )
@@ -95,6 +99,7 @@ if ($PSCmdlet.ShouldProcess($resolvedRuntimeRoot, 'Prepare EasyProtocol GHCR run
         "EASY_PROTOCOL_SERVICE_IMAGE=$Image"
         "EASY_PROTOCOL_SERVICE_NETWORK_NAME=$NetworkName"
         "EASY_PROTOCOL_SERVICE_CONTAINER_NAME=$ContainerName"
+        "EASY_PROTOCOL_SERVICE_NETWORK_ALIAS=$NetworkAlias"
     ) | Set-Content -LiteralPath $runtimeEnvFilePath -Encoding utf8
 }
 
@@ -121,6 +126,7 @@ if (-not [string]::IsNullOrWhiteSpace($existingContainerId)) {
 if ($PSCmdlet.ShouldProcess($runtimeComposePath, 'Deploy EasyProtocol service container from GHCR')) {
     Invoke-CheckedCommand -FilePath 'docker' -Arguments @(
         'compose',
+        '-p', $ComposeProjectName,
         '--env-file', $runtimeEnvFilePath,
         '-f', $runtimeComposePath,
         'up', '-d', '--remove-orphans'
@@ -139,3 +145,4 @@ if ($deployedImage -ne $Image -and -not $deployedImage.StartsWith("$Image@")) {
 Write-Host 'EasyProtocol GHCR runtime deployed successfully.' -ForegroundColor Green
 Write-Host "Runtime root: $resolvedRuntimeRoot"
 Write-Host "Image: $Image"
+Write-Host "Compose project: $ComposeProjectName"
