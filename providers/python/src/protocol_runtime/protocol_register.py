@@ -1664,6 +1664,7 @@ def _prime_protocol_auth_session_with_browser(
     new_driver = _load_protocol_browser_new_driver()
     driver = None
     proxy_dir = None
+    bootstrap_succeeded = False
     before_cookie_names = _session_cookie_name_summary(session, limit=50)
     try:
         driver, proxy_dir = new_driver(
