@@ -828,6 +828,33 @@ def _sentinel_token_lengths(token: str) -> tuple[int, int, bool]:
     )
 
 
+def _signup_sentinel_candidate_early_stop_thresholds() -> tuple[int, int]:
+    raw_t_len = str(
+        os.environ.get("PROTOCOL_SIGNUP_SENTINEL_EARLY_STOP_T_LEN")
+        or os.environ.get("PROTOCOL_SIGNUP_SENTINEL_T_LEN_EARLY_STOP")
+        or "1200"
+    ).strip()
+    raw_p_len = str(
+        os.environ.get("PROTOCOL_SIGNUP_SENTINEL_EARLY_STOP_P_LEN")
+        or os.environ.get("PROTOCOL_SIGNUP_SENTINEL_P_LEN_EARLY_STOP")
+        or "600"
+    ).strip()
+    try:
+        t_len = int(raw_t_len)
+    except Exception:
+        t_len = 1200
+    try:
+        p_len = int(raw_p_len)
+    except Exception:
+        p_len = 600
+    return max(1, t_len), max(1, p_len)
+
+
+def _signup_sentinel_candidate_is_good_enough(*, t_len: int, p_len: int, has_c: bool) -> bool:
+    min_t_len, min_p_len = _signup_sentinel_candidate_early_stop_thresholds()
+    return bool(has_c) and int(t_len) >= min_t_len and int(p_len) >= min_p_len
+
+
 def _build_signup_sentinel_candidates(
     *,
     session: requests.Session,
@@ -847,6 +874,7 @@ def _build_signup_sentinel_candidates(
         ("with_email", email),
         ("without_email", None),
     ]
+    current_persona_has_strong_candidate = False
     for persona_label, persona_value in persona_values:
         with _temporary_env_value("PROTOCOL_SENTINEL_PERSONA", persona_value):
             candidate_context = sentinel_context
@@ -890,6 +918,20 @@ def _build_signup_sentinel_candidates(
                         has_c,
                     )
                 )
+                if (
+                    persona_label == "current"
+                    and _signup_sentinel_candidate_is_good_enough(t_len=t_len, p_len=p_len, has_c=has_c)
+                ):
+                    current_persona_has_strong_candidate = True
+            if persona_label == "current" and current_persona_has_strong_candidate:
+                print(
+                    "[protocol-small-success] sentinel candidate early stop "
+                    f"persona={persona_label} thresholds={_signup_sentinel_candidate_early_stop_thresholds()}",
+                    flush=True,
+                )
+                break
+        if persona_label == "current" and current_persona_has_strong_candidate:
+            break
     preferred_label_order = {
         "har1:without_email": 0,
         "har2:without_email": 1,

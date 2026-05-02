@@ -170,6 +170,35 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertTrue(any(str(item.get("variant") or "") == "browser_native" for item in attempt_history))
         browser_fallback.assert_called_once()
 
+    def test_build_signup_sentinel_candidates_stops_after_strong_current_persona(self) -> None:
+        session = mock.Mock()
+        sentinel_context = SimpleNamespace(user_agent="ua")
+        with mock.patch.object(
+            protocol_small_success,
+            "_get_sentinel_header_for_signup",
+            side_effect=["token-current-with-email", "token-current-without-email"],
+        ) as get_sentinel, mock.patch.object(
+            protocol_small_success,
+            "_sentinel_token_lengths",
+            side_effect=[(1312, 665, True), (1336, 665, True)],
+        ):
+            candidates = protocol_small_success._build_signup_sentinel_candidates(
+                session=session,
+                email="demo@example.com",
+                device_id="device-id",
+                explicit_proxy="http://proxy:8080",
+                sentinel_context=sentinel_context,
+                network_attempt=1,
+            )
+        self.assertEqual(
+            [
+                ("current:without_email", "token-current-without-email"),
+                ("current:with_email", "token-current-with-email"),
+            ],
+            candidates,
+        )
+        self.assertEqual(2, get_sentinel.call_count)
+
     def test_chatgpt_login_request_retries_transient_network_error(self) -> None:
         session = mock.Mock()
         response = SimpleNamespace(status_code=200, url="https://chatgpt.com/auth/login_with")
