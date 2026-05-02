@@ -10,7 +10,8 @@ param(
         'build-provider-images',
         'publish-provider-images',
         'sync-import',
-        'isolated-instance'
+        'isolated-instance',
+        'isolated-instance-ghcr'
     )]
     [string]$Project,
     [string]$ConfigPath = (Join-Path $PSScriptRoot '..\config.yaml'),
@@ -27,6 +28,8 @@ param(
     [int]$PythonManagerHostPort = 29103,
     [string]$GhcrOwner = '',
     [string]$Image = '',
+    [string]$ProviderImage = '',
+    [string]$ProviderReleaseTag = '',
     [switch]$SkipPull,
     [string]$RegisterOutputDirHost = '',
     [string]$RegisterTeamAuthDirHost = '',
@@ -130,17 +133,6 @@ switch ($Project) {
         break
     }
     'isolated-instance' {
-        $invokeParams = @{
-            InstanceName = $InstanceName
-            ConfigPath = $resolvedConfigPath
-            GatewayHostPort = $GatewayHostPort
-            PythonManagerHostPort = $PythonManagerHostPort
-        }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $invokeParams.RegisterOutputDirHost = $RegisterOutputDirHost }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $invokeParams.RegisterTeamAuthDirHost = $RegisterTeamAuthDirHost }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $invokeParams.RegisterTeamLocalDirHost = $RegisterTeamLocalDirHost }
-        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $invokeParams.MailboxServiceApiKey = $MailboxServiceApiKey }
-        if ($NoBuild) { $invokeParams.NoBuild = $true }
         $args = @(
             '-InstanceName', $InstanceName,
             '-ConfigPath', $resolvedConfigPath,
@@ -152,6 +144,27 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
         if ($NoBuild) { $args += '-NoBuild' }
+        Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') -Arguments $args -FailureMessage 'deploy-isolated-easyprotocol-instance.ps1 failed'
+        break
+    }
+    'isolated-instance-ghcr' {
+        $args = @(
+            '-InstanceName', $InstanceName,
+            '-ConfigPath', $resolvedConfigPath,
+            '-GatewayHostPort', [string]$GatewayHostPort,
+            '-PythonManagerHostPort', [string]$PythonManagerHostPort,
+            '-NoBuild'
+        )
+        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
+        if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) { $args += @('-ReleaseTag', $ReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @('-GhcrOwner', $GhcrOwner) }
+        if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @('-GatewayImage', $Image) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
+        if ($SkipPull) { $args += '-SkipPull' }
         Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') -Arguments $args -FailureMessage 'deploy-isolated-easyprotocol-instance.ps1 failed'
         break
     }

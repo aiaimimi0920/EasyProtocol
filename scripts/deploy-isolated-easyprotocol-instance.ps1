@@ -8,6 +8,12 @@ param(
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
     [string]$MailboxServiceApiKey = '',
+    [string]$GatewayImage = '',
+    [string]$ProviderImage = '',
+    [string]$ReleaseTag = '',
+    [string]$ProviderReleaseTag = '',
+    [string]$GhcrOwner = '',
+    [switch]$SkipPull,
     [switch]$NoBuild
 )
 
@@ -15,6 +21,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'lib/easyprotocol-config.ps1')
+. (Join-Path $PSScriptRoot 'lib/easyprotocol-ghcr.ps1')
 . (Join-Path $PSScriptRoot 'lib/easyprotocol-network.ps1')
 
 function Find-FreeTcpPort {
@@ -156,6 +163,30 @@ function Set-EnvFileVariable {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
 }
 
+function Resolve-ProviderPublishedImageName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Provider,
+        [string]$ConfiguredImage
+    )
+
+    $configuredName = [string]($ConfiguredImage -replace '^.+/', '' -replace ':.+$', '')
+    if (-not [string]::IsNullOrWhiteSpace($configuredName) -and $configuredName -notmatch '^(local|latest)$') {
+        switch ($configuredName) {
+            'python-protocol-service' { return 'easy-protocol-python-service' }
+            default { return $configuredName }
+        }
+    }
+
+    switch ($Provider.ToLowerInvariant()) {
+        'python' { return 'easy-protocol-python-service' }
+        'go' { return 'easy-protocol-go-service' }
+        'javascript' { return 'easy-protocol-javascript-service' }
+        'rust' { return 'easy-protocol-rust-service' }
+        default { return "$Provider-protocol-service" }
+    }
+}
+
 $repoRoot = Get-EasyProtocolRepoRoot
 $resolvedConfigPath = if ([System.IO.Path]::IsPathRooted($ConfigPath)) { $ConfigPath } else { Join-Path $repoRoot $ConfigPath }
 if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
@@ -173,6 +204,35 @@ $config = Read-EasyProtocolConfig -ConfigPath $resolvedConfigPath
 $pythonProvider = $config.providers.python
 if ($null -eq $pythonProvider) {
     throw 'Missing providers.python section in config.yaml.'
+}
+$ghcr = if ($config.publishing) { $config.publishing.ghcr } else { $null }
+$registry = if ($ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
+$configuredGatewayImage = if ($config.serviceBase -and $config.serviceBase.image) { [string]$config.serviceBase.image } else { 'easyprotocol/easy-protocol-service:local' }
+$configuredProviderImage = if ($pythonProvider.image) { [string]$pythonProvider.image } else { 'easyprotocol/python-protocol-service:local' }
+$gatewayImageName = [string]($configuredGatewayImage -replace '^.+/', '' -replace ':.+$', '')
+if ([string]::IsNullOrWhiteSpace($gatewayImageName)) { $gatewayImageName = 'easy-protocol-service' }
+$providerImageName = Resolve-ProviderPublishedImageName -Provider 'python' -ConfiguredImage $configuredProviderImage
+$useGhcrImages = (-not [string]::IsNullOrWhiteSpace($GatewayImage)) -or (-not [string]::IsNullOrWhiteSpace($ProviderImage)) -or (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) -or (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag))
+
+if ($useGhcrImages) {
+    if ([string]::IsNullOrWhiteSpace($GhcrOwner)) {
+        $GhcrOwner = if ($ghcr -and $ghcr.owner) { [string]$ghcr.owner } else { '' }
+    }
+    Assert-EasyProtocolGhcrOwnerReady -Owner $GhcrOwner -SourceDescription 'GHCR owner'
+
+    if ([string]::IsNullOrWhiteSpace($GatewayImage)) {
+        if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+            throw 'GHCR isolated deployment requires -GatewayImage or -ReleaseTag.'
+        }
+        $GatewayImage = "$registry/$GhcrOwner/${gatewayImageName}:$ReleaseTag"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProviderImage)) {
+        if ([string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
+            throw 'GHCR isolated deployment requires -ProviderImage or -ProviderReleaseTag.'
+        }
+        $ProviderImage = "$registry/$GhcrOwner/${providerImageName}:$ProviderReleaseTag"
+    }
 }
 
 $instanceRootBase = if ([string]::IsNullOrWhiteSpace($InstanceRoot)) {
@@ -231,9 +291,20 @@ if ($LASTEXITCODE -ne 0) {
     throw "render-derived-configs.ps1 failed with exit code $LASTEXITCODE"
 }
 
-if (-not $NoBuild) {
+if (-not $NoBuild -and -not $useGhcrImages) {
     & (Join-Path $PSScriptRoot 'compile-service-base-image.ps1') -ConfigPath $resolvedConfigPath
     & (Join-Path $PSScriptRoot 'compile-provider-image.ps1') -Provider python -ConfigPath $resolvedConfigPath
+}
+
+if ($useGhcrImages -and -not $SkipPull) {
+    docker pull $GatewayImage | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to pull isolated gateway image: $GatewayImage"
+    }
+    docker pull $ProviderImage | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to pull isolated provider image: $ProviderImage"
+    }
 }
 
 Ensure-EasyProtocolExternalNetwork -NetworkName 'EasyAiMi'
@@ -286,7 +357,7 @@ docker run -d `
     -v "${registerOutputDirHost}:/shared/register-output" `
     -v "${registerTeamAuthDirHost}:/shared/team-auth:ro" `
     -v "${registerTeamLocalDirHost}:/shared/local-team-store" `
-    easyprotocol/python-protocol-service:local | Out-Null
+    $(if ($useGhcrImages) { $ProviderImage } else { 'easyprotocol/python-protocol-service:local' }) | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to start isolated python manager container"
 }
@@ -302,7 +373,7 @@ docker run -d `
     -e EASY_PROTOCOL_RESET_STORE_ON_BOOT=false `
     -v "${configDir}:/etc/easy-protocol" `
     -v "${dataDir}:/var/lib/easy-protocol" `
-    easyprotocol/easy-protocol-service:local | Out-Null
+    $(if ($useGhcrImages) { $GatewayImage } else { 'easyprotocol/easy-protocol-service:local' }) | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to start isolated easyprotocol gateway container"
 }

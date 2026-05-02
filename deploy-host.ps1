@@ -9,7 +9,8 @@ param(
         "build-provider-images",
         "publish-provider-images",
         "sync-import",
-        "isolated-instance"
+        "isolated-instance",
+        "isolated-instance-ghcr"
     )]
     [string]$Project = "service-base-ghcr",
     [string]$ConfigPath = "config.yaml",
@@ -25,6 +26,8 @@ param(
     [int]$PythonManagerHostPort = 29103,
     [string]$GhcrOwner = "",
     [string]$Image = "",
+    [string]$ProviderImage = "",
+    [string]$ProviderReleaseTag = "",
     [switch]$SkipPull,
     [string]$RegisterOutputDirHost = "",
     [string]$RegisterTeamAuthDirHost = "",
@@ -252,6 +255,8 @@ if ($GatewayHostPort -gt 0) { $args += @("-GatewayHostPort", [string]$GatewayHos
 if ($PythonManagerHostPort -gt 0) { $args += @("-PythonManagerHostPort", [string]$PythonManagerHostPort) }
 if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @("-GhcrOwner", $GhcrOwner) }
 if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @("-Image", $Image) }
+if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @("-ProviderImage", $ProviderImage) }
+if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @("-ProviderReleaseTag", $ProviderReleaseTag) }
 if ($SkipPull) { $args += "-SkipPull" }
 if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @("-RegisterOutputDirHost", $RegisterOutputDirHost) }
 if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @("-RegisterTeamAuthDirHost", $RegisterTeamAuthDirHost) }
