@@ -16,6 +16,19 @@ def _base_url() -> str | None:
     return _clean_optional(os.environ.get("CAPTCHA_SERVICE_BASE_URL"))
 
 
+def _is_browser_attach_service_base_url(base_url: str | None) -> bool:
+    normalized = str(base_url or "").strip().lower()
+    if not normalized:
+        return False
+    browser_markers = (
+        "easy-browser",
+        "easybrowser-service",
+        "127.0.0.1:18080",
+        "localhost:18080",
+    )
+    return any(marker in normalized for marker in browser_markers)
+
+
 def _api_key() -> str | None:
     return _clean_optional(os.environ.get("CAPTCHA_SERVICE_API_KEY"))
 
@@ -57,6 +70,11 @@ def _post_json(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     base_url = _base_url()
     if not base_url:
         raise RuntimeError("captcha service base url is not configured")
+    if _is_browser_attach_service_base_url(base_url):
+        raise RuntimeError(
+            "captcha service base url points to EasyBrowser attach service; "
+            "expected a captcha task API endpoint that serves /createTask and /getTaskResult"
+        )
     req = urllib.request.Request(
         base_url.rstrip("/") + path,
         data=json.dumps(payload).encode("utf-8"),
