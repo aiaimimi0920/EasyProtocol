@@ -83,6 +83,7 @@ from that root config by scripts under `scripts/`.
 
 Current bootstrap entrypoints:
 
+- `deploy-host.ps1`
 - `scripts/init-config.ps1`
 - `scripts/render-derived-configs.ps1`
 - `scripts/test-all.ps1`
@@ -116,6 +117,98 @@ See `docs/github-actions-secrets.md` and
 `docs/easyprotocol-release-workflow.md` for the exact secret names and the
 import-code flow.
 
+## Local EasyProtocol Docker Deploy
+
+The canonical local Docker rollout for the public repository is:
+
+- GitHub Actions publish the gateway image to GHCR
+- the target host checks out this repository
+- a root PowerShell script pulls the tagged GHCR image and deploys the gateway
+  container into Docker
+
+This GHCR deploy path covers the `service/base` gateway container. It expects
+the target host to have access to any provider runtimes or upstream services
+the rendered gateway config points at.
+
+Prerequisites:
+
+- Windows PowerShell
+- Docker Desktop or another Docker engine with `docker compose`
+- Python 3 with `PyYAML`
+- a local checkout of this repository
+
+Prepare the root config:
+
+```powershell
+.\scripts\init-config.ps1
+```
+
+Then edit `config.yaml`. At minimum, fill in:
+
+- `publishing.ghcr.owner`
+  - the GitHub owner or org that publishes
+    `ghcr.io/<owner>/easy-protocol-service:<release-tag>`
+- `serviceBase.runtime.unified_api.password`
+- `serviceBase.runtime.control_plane.read_token`
+- `serviceBase.runtime.control_plane.mutate_token`
+- any provider or dependency values your gateway needs at runtime
+
+Recommended local GHCR rollout command:
+
+```powershell
+.\deploy-host.ps1 `
+  -ReleaseTag release-20260502-001
+```
+
+That root entrypoint is intentionally single-file distributable. If an operator
+downloads only `deploy-host.ps1`, it can bootstrap a local repo cache
+automatically before invoking the canonical deployment path.
+
+Lower-level GHCR rollout command:
+
+```powershell
+.\scripts\deploy-service-base.ps1 `
+  -ConfigPath .\config.yaml `
+  -FromGhcr `
+  -ReleaseTag release-20260502-001
+```
+
+Equivalent root one-click wrapper:
+
+```powershell
+.\scripts\deploy-subproject.ps1 `
+  -Project service-base-ghcr `
+  -ConfigPath .\config.yaml `
+  -ReleaseTag release-20260502-001
+```
+
+You can also pin the full image reference directly:
+
+```powershell
+.\scripts\deploy-service-base.ps1 `
+  -ConfigPath .\config.yaml `
+  -FromGhcr `
+  -Image ghcr.io/<owner>/easy-protocol-service:<release-tag>
+```
+
+What the root deploy script does:
+
+- renders `deploy/service/base/config/config.yaml`
+- renders `deploy/service/base/config/runtime.env`
+- ensures the external Docker network exists
+- pulls the requested GHCR image unless `-SkipPull` was passed
+- writes the runtime `.env` used by `deploy/service/base/docker-compose.yaml`
+- replaces the existing `easyprotocol-service-base` container if one already exists
+- runs Docker Compose to bring the gateway back up
+
+Recommended post-deploy checks:
+
+```powershell
+docker ps --filter "name=easyprotocol-service-base"
+
+Invoke-RestMethod -Uri "http://127.0.0.1:19788/health" -Method Get
+```
+
 ## Migration Rule
 
 This repository is built by copy-only migration from the legacy
@@ -138,3 +231,4 @@ See `docs/migration-plan.md` for the source-to-target mapping.
 - `docs/github-actions-secrets.md`
 - `docs/easyprotocol-release-workflow.md`
 - `docs/python-protocol-manager-runtime-pool.md`
+- `docs/root-host-deploy-standard.md`
