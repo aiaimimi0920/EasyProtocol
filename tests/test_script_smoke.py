@@ -156,6 +156,24 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertEqual(payload["GatewayHostPort"], 19788)
             self.assertEqual(payload["ConfigPath"], r"C:\\demo\\config.yaml")
 
+    def test_python_provider_dockerfile_includes_browser_runtime_dependencies(self):
+        dockerfile_path = REPO_ROOT / "deploy" / "providers" / "python" / "Dockerfile"
+        content = dockerfile_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            "chromium",
+            "chromium-driver",
+            "libnspr4",
+            "libnss3",
+            "libdbus-1-3",
+            "CHROMEDRIVER_PATH=/usr/bin/chromedriver",
+            "BROWSER_BINARY_PATH=/usr/bin/chromium",
+            "USE_UNDETECTED_CHROMEDRIVER=0",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
 
 if __name__ == "__main__":
     unittest.main()
