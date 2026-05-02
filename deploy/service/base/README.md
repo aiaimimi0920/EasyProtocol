@@ -32,6 +32,8 @@ edited directly in tracked deploy-local files.
   - local docker compose entrypoint for the gateway runtime
 - `scripts/publish-ghcr-easy-protocol-service.ps1`
   - local GHCR publish helper
+- `scripts/deploy-ghcr-easy-protocol-service.ps1`
+  - local GHCR deploy helper for the gateway runtime
 - `scripts/smoke-easy-protocol-docker-api.ps1`
   - local container API smoke helper
 
@@ -98,3 +100,32 @@ docker compose -f .\deploy\service\base\docker-compose.yaml up -d --build
 ```
 
 Default port: `http://127.0.0.1:19788`
+
+## Local GHCR Deploy
+
+Canonical root entrypoint:
+
+```powershell
+.\scripts\deploy-service-base.ps1 `
+  -ConfigPath .\config.yaml `
+  -FromGhcr `
+  -ReleaseTag <release-tag>
+```
+
+One-click wrapper:
+
+```powershell
+.\scripts\deploy-subproject.ps1 `
+  -Project service-base-ghcr `
+  -ConfigPath .\config.yaml `
+  -ReleaseTag <release-tag>
+```
+
+Lower-level helper:
+
+```powershell
+.\deploy\service\base\scripts\deploy-ghcr-easy-protocol-service.ps1 `
+  -ConfigPath .\deploy\service\base\config\config.yaml `
+  -RuntimeEnvPath .\deploy\service\base\config\runtime.env `
+  -Image ghcr.io/<owner>/easy-protocol-service:<release-tag>
+```

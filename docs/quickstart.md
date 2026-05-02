@@ -41,6 +41,24 @@ Current generated outputs:
 .\scripts\deploy-service-base.ps1 -ConfigPath .\config.yaml
 ```
 
+To pull a published GHCR gateway image instead of building locally:
+
+```powershell
+.\scripts\deploy-service-base.ps1 `
+  -ConfigPath .\config.yaml `
+  -FromGhcr `
+  -ReleaseTag release-20260502-001
+```
+
+Equivalent root wrapper:
+
+```powershell
+.\scripts\deploy-subproject.ps1 `
+  -Project service-base-ghcr `
+  -ConfigPath .\config.yaml `
+  -ReleaseTag release-20260502-001
+```
+
 ## 6. Run The Full EasyProtocol Stack
 
 ```powershell

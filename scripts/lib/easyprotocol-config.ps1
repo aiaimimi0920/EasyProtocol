@@ -1,6 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'easyprotocol-common.ps1')
+
 function Get-EasyProtocolRepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot '..\\..')).Path
 }
