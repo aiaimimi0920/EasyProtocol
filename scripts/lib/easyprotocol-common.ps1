@@ -49,7 +49,14 @@ function Invoke-EasyProtocolExternalCommand {
             return
         }
 
-        & $FilePath @Arguments
+        $extension = [System.IO.Path]::GetExtension($FilePath)
+        if ($extension -ieq '.ps1') {
+            $invokeArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $FilePath) + @($Arguments)
+            & powershell @invokeArgs
+        }
+        else {
+            & $FilePath @Arguments
+        }
         if ($LASTEXITCODE -ne 0) {
             if ([string]::IsNullOrWhiteSpace($FailureMessage)) {
                 throw ("Command failed with exit code {0}: {1} {2}" -f $LASTEXITCODE, $FilePath, ($Arguments -join ' '))

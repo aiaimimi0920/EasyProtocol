@@ -110,6 +110,52 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn(str(rendered_runtime_env), args)
             self.assertIn("-SkipPull", args)
 
+    def test_external_command_helper_runs_powershell_script_with_named_arguments(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            helper_script = Path(temp_dir) / "echo-params.ps1"
+            helper_script.write_text(
+                "\n".join(
+                    [
+                        "param(",
+                        "    [int]$GatewayHostPort,",
+                        "    [string]$ConfigPath",
+                        ")",
+                        "$payload = @{",
+                        "    GatewayHostPort = $GatewayHostPort",
+                        "    ConfigPath = $ConfigPath",
+                        "}",
+                        "$payload | ConvertTo-Json -Compress",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runner_script = Path(temp_dir) / "runner.ps1"
+            runner_script.write_text(
+                "\n".join(
+                    [
+                        f". '{(REPO_ROOT / 'scripts' / 'lib' / 'easyprotocol-common.ps1').as_posix()}'",
+                        "$externalArgs = @(",
+                        "    '-GatewayHostPort', '19788',",
+                        "    '-ConfigPath', 'C:\\\\demo\\\\config.yaml'",
+                        ")",
+                        f"Invoke-EasyProtocolExternalCommand -FilePath '{helper_script.as_posix()}' -Arguments $externalArgs",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(runner_script),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            payload = json.loads(result.stdout.strip())
+            self.assertEqual(payload["GatewayHostPort"], 19788)
+            self.assertEqual(payload["ConfigPath"], r"C:\\demo\\config.yaml")
+
 
 if __name__ == "__main__":
     unittest.main()
