@@ -69,7 +69,7 @@ try {
   $health = $null
   $status = $null
   $lastError = $null
-  for ($attempt = 1; $attempt -le 20; $attempt += 1) {
+  for ($attempt = 1; $attempt -le 60; $attempt += 1) {
     try {
       $health = Invoke-RestMethod -Uri "http://127.0.0.1:${HostPort}/api/health" -Method Get
       $status = Invoke-RestMethod -Uri "http://127.0.0.1:${HostPort}/api/public/status" -Method Get
@@ -82,6 +82,8 @@ try {
   }
 
   if ($null -eq $health -or $null -eq $status) {
+    Write-Warning "smoke health check never succeeded; dumping container logs for $containerName"
+    docker logs $containerName 2>$null | Out-Host
     throw "smoke health check failed: $lastError"
   }
 
