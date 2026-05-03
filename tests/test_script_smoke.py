@@ -217,6 +217,7 @@ class ScriptSmokeTests(unittest.TestCase):
         content = (REPO_ROOT / "scripts" / "deploy-isolated-easyprotocol-instance.ps1").read_text(encoding="utf-8")
         self.assertIn("docker compose -p easy-protocol", content)
         self.assertIn('$gatewayContainerName = "easy-protocol"', content)
+        self.assertIn(":/shared/register-output", content)
 
 
 if __name__ == "__main__":
