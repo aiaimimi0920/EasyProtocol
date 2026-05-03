@@ -42,7 +42,8 @@ from protocol_runtime.errors import ensure_protocol_runtime_error
 
 
 DEFAULT_REGISTER_PROTOCOL_HOST_ID = "python-register-protocol"
-DEFAULT_EASY_EMAIL_BASE_URL = "http://localhost:18080"
+DEFAULT_EASY_EMAIL_BASE_URL_HOST = "http://localhost:18080"
+DEFAULT_EASY_EMAIL_BASE_URL_DOCKER = "http://easy-email:8080"
 DEFAULT_EASY_EMAIL_API_KEY = "J7L+RCwLIBEcMZHzz0rXjm4oyR9rymq9"
 ALL_MAILBOX_PROVIDER_CANDIDATES = (
     "im215",
@@ -198,7 +199,9 @@ def ensure_easy_email_env_defaults() -> None:
     # open MoEmail mailboxes without requiring per-shell manual exports.
     base_url = str(os.environ.get("MAILBOX_SERVICE_BASE_URL") or "").strip()
     if not base_url:
-        os.environ["MAILBOX_SERVICE_BASE_URL"] = DEFAULT_EASY_EMAIL_BASE_URL
+        os.environ["MAILBOX_SERVICE_BASE_URL"] = (
+            DEFAULT_EASY_EMAIL_BASE_URL_DOCKER if _running_in_docker() else DEFAULT_EASY_EMAIL_BASE_URL_HOST
+        )
     api_key = str(os.environ.get("MAILBOX_SERVICE_API_KEY") or "").strip()
     if not api_key:
         os.environ["MAILBOX_SERVICE_API_KEY"] = DEFAULT_EASY_EMAIL_API_KEY

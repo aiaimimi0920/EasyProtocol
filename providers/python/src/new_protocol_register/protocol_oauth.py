@@ -80,9 +80,13 @@ def _read_easyemail_server_api_key() -> str:
     return ""
 
 
+def _default_easyemail_base_url() -> str:
+    return "http://easy-email:8080" if Path("/.dockerenv").exists() else "http://localhost:18080"
+
+
 def _ensure_protocol_oauth_easy_runtime_defaults() -> None:
     if not str(os.environ.get("MAILBOX_SERVICE_BASE_URL") or "").strip():
-        os.environ["MAILBOX_SERVICE_BASE_URL"] = "http://localhost:18080"
+        os.environ["MAILBOX_SERVICE_BASE_URL"] = _default_easyemail_base_url()
     if not str(os.environ.get("MAILBOX_SERVICE_API_KEY") or "").strip():
         api_key = ""
         current = Path(__file__).resolve()

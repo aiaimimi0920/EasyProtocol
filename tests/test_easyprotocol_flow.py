@@ -16,6 +16,7 @@ from new_protocol_register.easyprotocol_flow import _update_team_expand_progress
 from new_protocol_register import easyprotocol_flow  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
 from new_protocol_register import protocol_chatgpt_login  # noqa: E402
+from new_protocol_register import protocol_oauth  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.others import runtime as protocol_runtime  # noqa: E402
 from protocol_runtime import protocol_register  # noqa: E402
@@ -281,6 +282,22 @@ class EasyProtocolFlowTests(unittest.TestCase):
         create_mailbox.assert_called_once()
         self.assertEqual("cloudflare_temp_email", create_mailbox.call_args.kwargs["provider"])
         self.assertEqual(expected_mailbox, mailbox)
+
+    def test_ensure_easy_email_env_defaults_uses_docker_alias_inside_docker(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            protocol_runtime, "_running_in_docker", return_value=True
+        ):
+            protocol_runtime.ensure_easy_email_env_defaults()
+            self.assertEqual("http://easy-email:8080", os.environ.get("MAILBOX_SERVICE_BASE_URL"))
+
+    def test_protocol_oauth_defaults_mailbox_base_url_to_easy_email_inside_docker(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            protocol_oauth, "_default_easyemail_base_url", return_value="http://easy-email:8080"
+        ), mock.patch.object(
+            protocol_oauth, "_read_easyemail_server_api_key", return_value=""
+        ):
+            protocol_oauth._ensure_protocol_oauth_easy_runtime_defaults()
+            self.assertEqual("http://easy-email:8080", os.environ.get("MAILBOX_SERVICE_BASE_URL"))
 
     def test_send_passwordless_login_otp_posts_authapi_login_endpoint(self) -> None:
         response = SimpleNamespace(status_code=200)
