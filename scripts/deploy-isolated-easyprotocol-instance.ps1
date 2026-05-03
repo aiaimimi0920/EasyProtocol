@@ -537,14 +537,14 @@ if ($useGhcrImages -and -not $SkipPull) {
     }
 }
 
-$providerRuntimePlans = Get-EnabledProviderRuntimePlans `
+$providerRuntimePlans = @(Get-EnabledProviderRuntimePlans `
     -ServiceBaseConfig $config.serviceBase `
     -ProvidersConfig $providers `
     -UseGhcrImages $useGhcrImages `
     -Registry $registry `
     -GhcrOwner $GhcrOwner `
     -ProviderReleaseTag $ProviderReleaseTag `
-    -PythonProviderImageOverride $ProviderImage
+    -PythonProviderImageOverride $ProviderImage)
 
 if ($providerRuntimePlans.Count -eq 0) {
     throw 'No enabled provider runtime plans were generated from config.yaml.'
