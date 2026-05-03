@@ -295,6 +295,8 @@ function Write-ProviderEnvFile {
 function Get-EnabledProviderRuntimePlans {
     param(
         [Parameter(Mandatory = $true)]
+        $ServiceBaseConfig,
+        [Parameter(Mandatory = $true)]
         $ProvidersConfig,
         [bool]$UseGhcrImages,
         [string]$Registry,
@@ -304,6 +306,9 @@ function Get-EnabledProviderRuntimePlans {
     )
 
     $plans = @()
+    $runtimeConfig = if ($null -ne $ServiceBaseConfig) { $ServiceBaseConfig.runtime } else { $null }
+    $providerPoolConfig = if ($null -ne $runtimeConfig) { $runtimeConfig.providerPool } else { $null }
+    $poolProviders = if ($null -ne $providerPoolConfig) { $providerPoolConfig.providers } else { $null }
 
     foreach ($providerProperty in $ProvidersConfig.PSObject.Properties) {
         $providerKey = [string]$providerProperty.Name
@@ -325,8 +330,20 @@ function Get-EnabledProviderRuntimePlans {
             continue
         }
 
+        $poolProviderConfig = if ($null -ne $poolProviders) { $poolProviders.$providerKey } else { $null }
+        $warmReplicasRaw = $null
+        if ($null -ne $poolProviderConfig -and $poolProviderConfig.PSObject.Properties.Match('warmReplicas').Count -gt 0) {
+            $warmReplicasRaw = $poolProviderConfig.warmReplicas
+        }
+
         $replicaCount = 1
-        if ($registryConfig.PSObject.Properties.Match('replicas').Count -gt 0) {
+        if ($null -ne $warmReplicasRaw) {
+            try {
+                $replicaCount = [int]$warmReplicasRaw
+            } catch {
+                $replicaCount = 1
+            }
+        } elseif ($registryConfig.PSObject.Properties.Match('replicas').Count -gt 0) {
             try {
                 $replicaCount = [int]$registryConfig.replicas
             } catch {
@@ -521,6 +538,7 @@ if ($useGhcrImages -and -not $SkipPull) {
 }
 
 $providerRuntimePlans = Get-EnabledProviderRuntimePlans `
+    -ServiceBaseConfig $config.serviceBase `
     -ProvidersConfig $providers `
     -UseGhcrImages $useGhcrImages `
     -Registry $registry `

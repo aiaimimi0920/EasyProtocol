@@ -11,6 +11,18 @@ serviceBase:
   runtime:
     mode: strategy
     log_level: info
+    providerPool:
+      providers:
+        python:
+          warmReplicas: 1
+          maxReplicas: 4
+          idleScaleDownSeconds: 120
+        go:
+          warmReplicas: 0
+        javascript:
+          warmReplicas: 0
+        rust:
+          warmReplicas: 0
     unified_api:
       listen: 0.0.0.0:9788
       password: change-me
@@ -68,7 +80,6 @@ providers:
       language: python
       endpointHostPrefix: easy-protocol-python
       port: 9100
-      replicas: 1
       supportedOperations:
         - codex.semantic.step
     containerEnvironment:
@@ -76,12 +87,12 @@ providers:
       PYTHON_PROTOCOL_HOST: 0.0.0.0
       PYTHON_PROTOCOL_PORT: "9100"
       PYTHON_PROTOCOL_MIN_WARM_WORKERS: "1"
-      PYTHON_PROTOCOL_MAX_WORKERS: "6"
-      PYTHON_PROTOCOL_IDLE_TIMEOUT_SECONDS: "600"
+      PYTHON_PROTOCOL_MAX_WORKERS: "1"
+      PYTHON_PROTOCOL_IDLE_TIMEOUT_SECONDS: "3600"
       PYTHON_PROTOCOL_TASK_TIMEOUT_SECONDS: "1800"
       PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS: "60"
-      PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER: "50"
-      PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS: "5"
+      PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER: "1000"
+      PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS: "30"
       MAILBOX_SERVICE_BASE_URL: http://easy-email:8080
       MAILBOX_SERVICE_API_KEY: ""
       CAPTCHA_SERVICE_BASE_URL: ""
@@ -116,7 +127,6 @@ providers:
       language: go
       endpointHostPrefix: easy-protocol-go
       port: 9100
-      replicas: 1
       supportedOperations: []
     containerEnvironment:
       GOLANG_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python-001:9100
@@ -130,7 +140,6 @@ providers:
       language: javascript
       endpointHostPrefix: easy-protocol-javascript
       port: 9100
-      replicas: 1
       supportedOperations: []
     containerEnvironment:
       JS_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python-001:9100
@@ -144,7 +153,6 @@ providers:
       language: rust
       endpointHostPrefix: easy-protocol-rust
       port: 9100
-      replicas: 1
       supportedOperations: []
     containerEnvironment:
       RUST_PROTOCOL_UPSTREAM_BASE_URL: http://easy-protocol-python-001:9100

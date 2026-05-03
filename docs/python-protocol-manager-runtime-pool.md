@@ -11,12 +11,12 @@ one worker process.
 
 ## Why This Exists
 
-The old static model kept many always-on Python execution containers. The new
-manager model keeps:
+The old static model kept many always-on Python execution containers. The
+current intended model keeps:
 
-- one stable provider endpoint for the gateway
-- process-level isolation for task execution
-- dynamic scale-up and scale-down inside the provider
+- one stable gateway-facing child endpoint such as `easy-protocol-python-001`
+- process-level isolation for task execution inside that child
+- warm capacity and replica count controlled by the EasyProtocol manager layer
 
 ## Health Endpoint
 
@@ -42,7 +42,8 @@ The `pool` object currently exposes:
 - `busyWorkers`
 - `idleWorkers`
 
-This is intended as the main runtime pool statistics endpoint.
+This is an execution-lane health view, not the public source of truth for
+top-level EasyProtocol scaling.
 
 ## Capabilities Endpoint
 
@@ -63,14 +64,16 @@ sending a real execution request.
 For `POST /invoke` with `operation=codex.semantic.step`:
 
 1. the manager validates `step_type` and `step_input`
-2. the manager acquires an idle worker or spawns a new one within the cap
+2. the child acquires its local execution lane
 3. the worker process executes the step
 4. the result or normalized error is returned to the HTTP caller
-5. the worker may be recycled if it reaches `maxTasksPerWorker`
+5. the worker may be recycled after local policy thresholds
 
 ## Pool Control Knobs
 
-These currently come from the Python provider container environment:
+These currently come from the Python provider container environment, but they
+should be treated as local child-lane settings rather than the main scaling
+policy:
 
 - `PYTHON_PROTOCOL_MIN_WARM_WORKERS`
 - `PYTHON_PROTOCOL_MAX_WORKERS`
@@ -79,6 +82,9 @@ These currently come from the Python provider container environment:
 - `PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS`
 - `PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER`
 - `PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS`
+
+The manager-layer warm count should instead come from the root EasyProtocol
+config, for example `serviceBase.runtime.providerPool.providers.python`.
 
 ## Error Behavior
 
@@ -95,4 +101,3 @@ Current manager-side categories:
 
 Worker-executed failures include `worker_id` inside `error.details` so a smoke
 test or operator can confirm that the request really reached a subprocess.
-

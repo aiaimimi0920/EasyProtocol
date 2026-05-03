@@ -68,13 +68,17 @@ providers keep their language-local operations and can also act as adapters
 around the Python runtime for selected `codex.*` flows.
 
 The Python side is now intended to run behind numbered provider child
-containers such as `easy-protocol-python-001`. Each child may still fan out
-real work into a dynamic subprocess pool with:
+containers such as `easy-protocol-python-001`.
 
-- minimum warm workers
-- bounded maximum workers
-- idle worker reap
-- per-worker task recycling
+The scaling unit now belongs to the EasyProtocol manager layer:
+
+- `easy-protocol` decides how many child executors should stay warm
+- child count is expressed through the root operator config
+- Python child containers are execution lanes, not the main scaling authority
+
+The Python child still keeps one local isolated execution lane internally, but
+the public architecture should treat provider child replica count as the main
+place for warm capacity, max concurrency, and idle scale-down.
 
 ## Configuration Direction
 

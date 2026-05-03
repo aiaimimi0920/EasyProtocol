@@ -78,6 +78,7 @@ def _replica_suffix(index: int, count: int) -> str:
 def _generate_registry_service_entries(
     *,
     registry: dict[str, Any],
+    pool_provider: dict[str, Any],
     default_name: str,
     default_language: str,
     default_endpoint_host: str,
@@ -96,8 +97,9 @@ def _generate_registry_service_entries(
     endpoint_host_prefix = str(registry.get("endpointHostPrefix") or "").strip()
     port = int(registry.get("port", 9100) or 9100)
     supported_operations = list(registry.get("supportedOperations") or [])
+    warm_replicas = pool_provider.get("warmReplicas") if isinstance(pool_provider, dict) else None
     replicas = _normalize_replica_count(
-        registry.get("replicas"),
+        warm_replicas if warm_replicas is not None else registry.get("replicas"),
         default=1 if endpoint_host_prefix else 0,
     )
 
@@ -127,6 +129,10 @@ def _generate_registry_service_entries(
 
 def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, Any]]:
     providers = get_dict(root_config, "providers")
+    service_base = get_dict(root_config, "serviceBase")
+    runtime_cfg = get_dict(service_base, "runtime")
+    provider_pool = get_dict(runtime_cfg, "providerPool")
+    pool_providers = get_dict(provider_pool, "providers")
     services: list[dict[str, Any]] = []
 
     python_provider = get_dict(providers, "python")
@@ -134,6 +140,7 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
     services.extend(
         _generate_registry_service_entries(
             registry=python_registry,
+            pool_provider=get_dict(pool_providers, "python"),
             default_name="PythonProtocol",
             default_language="python",
             default_endpoint_host="easy-protocol-python-001",
@@ -153,6 +160,7 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
         services.extend(
             _generate_registry_service_entries(
                 registry=registry,
+                pool_provider=get_dict(pool_providers, provider_key),
                 default_name=name_default,
                 default_language=language_default,
                 default_endpoint_host=endpoint_host_default,

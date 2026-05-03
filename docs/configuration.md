@@ -35,6 +35,13 @@ Used to define the public gateway runtime:
 - Dockerfile path
 - runtime config overlay merged onto `deploy/service/base/config.template.yaml`
 
+`serviceBase.runtime.providerPool` is now the intended manager-layer source of
+truth for provider child warm capacity. For example:
+
+- `providers.python.warmReplicas`
+- `providers.python.maxReplicas`
+- `providers.python.idleScaleDownSeconds`
+
 ### `providers`
 
 Used to define:
@@ -44,8 +51,9 @@ Used to define:
 - provider container environment defaults
 - Python provider host mount paths for stack deploys
 
-For the Python provider specifically, the container environment now also drives
-the dynamic execution pool, including:
+For the Python provider specifically, the container environment should only
+describe the child executor lane itself, not the top-level scaling policy.
+Keep these values narrow and stable by default:
 
 - `PYTHON_PROTOCOL_MIN_WARM_WORKERS`
 - `PYTHON_PROTOCOL_MAX_WORKERS`
@@ -53,6 +61,13 @@ the dynamic execution pool, including:
 - `PYTHON_PROTOCOL_TASK_TIMEOUT_SECONDS`
 - `PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS`
 - `PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER`
+
+The intended contract is:
+
+- `serviceBase.runtime.providerPool` decides how many provider child containers
+  stay warm
+- `providers.python.containerEnvironment` only defines the behavior of one
+  Python child execution lane
 
 ### `stack.easyProtocol`
 
