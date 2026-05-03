@@ -34,12 +34,18 @@ New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 Copy-Item -LiteralPath $resolvedConfigPath -Destination (Join-Path $configDir "config.yaml") -Force
 
 try {
-  $containerId = docker run -d `
-    --name $containerName `
-    -p "${HostPort}:9788" `
-    -v "${configDir}:/etc/easy-protocol" `
-    -v "${dataDir}:/var/lib/easy-protocol" `
-    $Image
+  $dockerArgs = @(
+    'run', '-d',
+    '--name', $containerName,
+    '-p', "${HostPort}:9788",
+    '-v', "${configDir}:/etc/easy-protocol",
+    '-v', "${dataDir}:/var/lib/easy-protocol"
+  )
+  if (Test-Path -LiteralPath '/var/run/docker.sock') {
+    $dockerArgs += @('-v', '/var/run/docker.sock:/var/run/docker.sock')
+  }
+  $dockerArgs += $Image
+  $containerId = & docker @dockerArgs
   if ($LASTEXITCODE -ne 0) {
     throw "docker run failed with exit code $LASTEXITCODE"
   }
