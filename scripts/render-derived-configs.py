@@ -70,6 +70,18 @@ def _normalize_replica_count(value: Any, *, default: int = 0) -> int:
     return max(0, parsed)
 
 
+def _normalize_duration_string(value: Any, *, default_seconds: int) -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default_seconds
+    return f"{max(0, parsed)}s"
+
+
 def _replica_suffix(index: int, count: int) -> str:
     width = max(3, len(str(max(1, count))))
     return f"{index:0{width}d}"
@@ -177,6 +189,21 @@ def build_service_base_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
     service_base = get_dict(root_config, "serviceBase")
     runtime_overlay = get_dict(service_base, "runtime")
     merged = deep_merge(template, runtime_overlay)
+    provider_pool = get_dict(merged, "provider_pool")
+    if not provider_pool:
+        provider_pool = get_dict(merged, "providerPool")
+    pool_providers = get_dict(provider_pool, "providers")
+    for provider_cfg in pool_providers.values():
+        if not isinstance(provider_cfg, dict):
+            continue
+        provider_cfg["idle_scale_down_seconds"] = _normalize_duration_string(
+            provider_cfg.get("idle_scale_down_seconds", provider_cfg.get("idleScaleDownSeconds")),
+            default_seconds=120,
+        )
+        provider_cfg["acquire_timeout"] = _normalize_duration_string(
+            provider_cfg.get("acquire_timeout", provider_cfg.get("acquireTimeout")),
+            default_seconds=30,
+        )
     generated_services = generate_registry_services(root_config)
     if generated_services:
         merged["services"] = generated_services
