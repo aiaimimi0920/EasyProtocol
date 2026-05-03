@@ -48,3 +48,11 @@ The canonical runtime shape must remain:
 - one outward-facing gateway container named `easy-protocol`
 - provider child containers derived from the enabled registry config, such as
   `easy-protocol-python-001` or `easy-protocol-rust-001`
+
+Those child containers must not be launched as unrelated standalone Docker
+containers. The canonical operator contract is:
+
+- one compose project named `easy-protocol`
+- the gateway container `easy-protocol` inside that project
+- provider child containers such as `easy-protocol-python-001` inside that
+  same compose project

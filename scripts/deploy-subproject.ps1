@@ -43,6 +43,47 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'lib/easyprotocol-common.ps1')
 
+function Invoke-CanonicalEasyProtocolComposeDeploy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [switch]$ForceGhcr
+    )
+
+    $args = @(
+        '-InstanceName', $InstanceName,
+        '-ConfigPath', $ResolvedConfigPath,
+        '-GatewayHostPort', [string]$GatewayHostPort,
+        '-PythonManagerHostPort', [string]$PythonManagerHostPort,
+        '-PythonSlot', [string]$PythonSlot
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
+
+    $useGhcrImages = $ForceGhcr -or `
+        (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) -or `
+        (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) -or `
+        (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) -or `
+        (-not [string]::IsNullOrWhiteSpace($Image)) -or `
+        (-not [string]::IsNullOrWhiteSpace($ProviderImage))
+
+    if ($useGhcrImages) {
+        $args += '-NoBuild'
+        if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) { $args += @('-ReleaseTag', $ReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @('-GhcrOwner', $GhcrOwner) }
+        if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @('-GatewayImage', $Image) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
+        if ($SkipPull) { $args += '-SkipPull' }
+    } elseif ($NoBuild) {
+        $args += '-NoBuild'
+    }
+
+    Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') -Arguments $args -FailureMessage 'deploy-isolated-easyprotocol-instance.ps1 failed'
+}
+
 function Resolve-ConfigPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -86,9 +127,7 @@ switch ($Project) {
         break
     }
     'easy-protocol' {
-        $args = @('-ConfigPath', $resolvedConfigPath)
-        if ($NoBuild) { $args += '-NoBuild' }
-        Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-easyprotocol-stack.ps1') -Arguments $args -FailureMessage 'deploy-easyprotocol-stack.ps1 failed'
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath
         break
     }
     'release-service-base' {
@@ -134,41 +173,11 @@ switch ($Project) {
         break
     }
     'isolated-instance' {
-        $args = @(
-            '-InstanceName', $InstanceName,
-            '-ConfigPath', $resolvedConfigPath,
-            '-GatewayHostPort', [string]$GatewayHostPort,
-            '-PythonManagerHostPort', [string]$PythonManagerHostPort,
-            '-PythonSlot', [string]$PythonSlot
-        )
-        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
-        if ($NoBuild) { $args += '-NoBuild' }
-        Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') -Arguments $args -FailureMessage 'deploy-isolated-easyprotocol-instance.ps1 failed'
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath
         break
     }
     'isolated-instance-ghcr' {
-        $args = @(
-            '-InstanceName', $InstanceName,
-            '-ConfigPath', $resolvedConfigPath,
-            '-GatewayHostPort', [string]$GatewayHostPort,
-            '-PythonManagerHostPort', [string]$PythonManagerHostPort,
-            '-PythonSlot', [string]$PythonSlot,
-            '-NoBuild'
-        )
-        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
-        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
-        if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) { $args += @('-ReleaseTag', $ReleaseTag) }
-        if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
-        if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @('-GhcrOwner', $GhcrOwner) }
-        if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @('-GatewayImage', $Image) }
-        if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
-        if ($SkipPull) { $args += '-SkipPull' }
-        Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-isolated-easyprotocol-instance.ps1') -Arguments $args -FailureMessage 'deploy-isolated-easyprotocol-instance.ps1 failed'
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath -ForceGhcr
         break
     }
 }

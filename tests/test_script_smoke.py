@@ -175,9 +175,9 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
-    def test_root_deploy_host_defaults_to_isolated_instance_ghcr(self):
+    def test_root_deploy_host_defaults_to_easy_protocol(self):
         content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
-        self.assertIn('[string]$Project = "isolated-instance-ghcr"', content)
+        self.assertIn('[string]$Project = "easy-protocol"', content)
 
     def test_render_derived_configs_expands_numbered_provider_hosts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -218,6 +218,51 @@ class ScriptSmokeTests(unittest.TestCase):
         self.assertIn("docker compose -p easy-protocol", content)
         self.assertIn('$gatewayContainerName = "easy-protocol"', content)
         self.assertIn(":/shared/register-output", content)
+
+    def test_deploy_subproject_routes_easy_protocol_to_isolated_compose_deploy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_path = Path(temp_dir) / "external.jsonl"
+            temp_config = Path(temp_dir) / "config.yaml"
+            template = (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")
+            temp_config.write_text(template.replace('owner: ""', 'owner: test-owner'), encoding="utf-8")
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(REPO_ROOT / "scripts" / "deploy-subproject.ps1"),
+                    "-Project",
+                    "easy-protocol",
+                    "-ConfigPath",
+                    str(temp_config),
+                    "-InstanceName",
+                    "smoke01",
+                    "-GatewayHostPort",
+                    "29789",
+                    "-PythonManagerHostPort",
+                    "29103",
+                    "-ReleaseTag",
+                    "release-20260503-001",
+                    "-ProviderReleaseTag",
+                    "providers-20260503-001",
+                    "-SkipPull",
+                ],
+                env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            records = read_json_lines(capture_path)
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertTrue(record["FilePath"].lower().endswith("deploy-isolated-easyprotocol-instance.ps1"))
+            args = record["Arguments"]
+            self.assertIn("-InstanceName", args)
+            self.assertIn("smoke01", args)
+            self.assertIn("-NoBuild", args)
+            self.assertIn("-ReleaseTag", args)
+            self.assertIn("release-20260503-001", args)
+            self.assertIn("-ProviderReleaseTag", args)
+            self.assertIn("providers-20260503-001", args)
+            self.assertIn("-SkipPull", args)
 
 
 if __name__ == "__main__":

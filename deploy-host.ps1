@@ -12,7 +12,7 @@ param(
         "isolated-instance",
         "isolated-instance-ghcr"
     )]
-    [string]$Project = "isolated-instance-ghcr",
+    [string]$Project = "easy-protocol",
     [string]$ConfigPath = "config.yaml",
     [switch]$NoBuild,
     [switch]$SkipRender,

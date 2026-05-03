@@ -62,11 +62,16 @@ Equivalent root wrapper:
 ## 6. Run The Full EasyProtocol Stack
 
 ```powershell
-.\scripts\deploy-easyprotocol-stack.ps1 -ConfigPath .\config.yaml
+.\scripts\deploy-subproject.ps1 -Project easy-protocol -ConfigPath .\config.yaml
 ```
 
-That stack and the standalone gateway deploy both ensure the external
-`EasyAiMi` Docker network exists before startup.
+That canonical compose deploy ensures the external `EasyAiMi` Docker network
+exists before startup and keeps:
+
+- `easy-protocol`
+- `easy-protocol-python-001`
+
+inside the same `easy-protocol` compose project.
 
 ## 7. Run The One-Shot Local Service Release Flow
 
@@ -76,19 +81,21 @@ That stack and the standalone gateway deploy both ensure the external
 
 ## 8. Launch An Isolated New Instance
 
-This is the safe way to bring up a new gateway + python manager instance
-without touching older running containers:
+`easy-protocol` is now the canonical project name even for the isolated
+gateway-plus-provider deployment. The underlying helper remains available, but
+the preferred operator entrypoint is still the root wrapper:
 
 ```powershell
-.\scripts\deploy-isolated-easyprotocol-instance.ps1 `
+.\scripts\deploy-subproject.ps1 `
+  -Project easy-protocol `
   -ConfigPath .\config.yaml `
   -InstanceName dyn01 `
   -GatewayHostPort 29789 `
   -PythonManagerHostPort 29103
 ```
 
-The isolated instance still joins `EasyAiMi`, but it uses its own container
-names, host ports, config mount, and data directory.
+This still joins `EasyAiMi`, but it keeps the gateway and provider children
+under the same `easy-protocol` compose project for unified operator management.
 
 ## 9. Build Provider Images
 

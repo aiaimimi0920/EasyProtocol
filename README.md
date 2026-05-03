@@ -95,7 +95,6 @@ Current bootstrap entrypoints:
 - `scripts/compile-service-base-image.ps1`
 - `scripts/compile-provider-image.ps1`
 - `scripts/deploy-service-base.ps1`
-- `scripts/deploy-easyprotocol-stack.ps1`
 - `scripts/deploy-easyprotocol-release.ps1`
 - `scripts/deploy-isolated-easyprotocol-instance.ps1`
 - `scripts/upload-service-base-r2-config.ps1`
@@ -142,10 +141,15 @@ and provider sidecars are expected to follow numbered child names such as:
 - `easy-protocol-rust-001`
 
 The root deploy path is therefore no longer just "gateway-only". It is
-expected to bring up the gateway and the default provider child runtime needed
-by the rendered config. In the current default operator config, that means the
-Python child runtime is enabled by default; other provider families stay
-available but disabled until the operator explicitly turns them on.
+expected to bring up one canonical Docker compose project named
+`easy-protocol`, containing:
+
+- the gateway container `easy-protocol`
+- provider child containers such as `easy-protocol-python-001`
+
+In the current default operator config, that means the Python child runtime is
+enabled by default; other provider families stay available but disabled until
+the operator explicitly turns them on.
 
 Prerequisites:
 
@@ -170,7 +174,7 @@ Then edit `config.yaml`. At minimum, fill in:
 - `serviceBase.runtime.control_plane.mutate_token`
 - any provider or dependency values your gateway needs at runtime
 
-Recommended local GHCR rollout command:
+Recommended canonical GHCR rollout command:
 
 ```powershell
 .\deploy-host.ps1 `
@@ -194,18 +198,9 @@ Equivalent root one-click wrapper:
 
 ```powershell
 .\scripts\deploy-subproject.ps1 `
-  -Project service-base-ghcr `
+  -Project easy-protocol `
   -ConfigPath .\config.yaml `
   -ReleaseTag release-20260502-001
-```
-
-You can also pin the full image reference directly:
-
-```powershell
-.\scripts\deploy-service-base.ps1 `
-  -ConfigPath .\config.yaml `
-  -FromGhcr `
-  -Image ghcr.io/<owner>/easy-protocol-service:<release-tag>
 ```
 
 What the root deploy script does:
@@ -213,8 +208,19 @@ What the root deploy script does:
 - renders the gateway config from the root operator config
 - ensures the external Docker network exists
 - pulls the requested gateway and provider images unless `-SkipPull` was passed
-- brings up the canonical gateway container `easy-protocol`
-- derives numbered provider child containers such as `easy-protocol-python-001`
+- brings up the canonical compose project `easy-protocol`
+- keeps the gateway container `easy-protocol` inside that compose project
+- keeps numbered provider child containers such as
+  `easy-protocol-python-001` inside the same compose project
+
+You can still use the lower-level helpers directly when needed:
+
+```powershell
+.\scripts\deploy-service-base.ps1 `
+  -ConfigPath .\config.yaml `
+  -FromGhcr `
+  -Image ghcr.io/<owner>/easy-protocol-service:<release-tag>
+```
 
 Recommended post-deploy checks:
 
