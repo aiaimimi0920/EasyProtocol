@@ -26,14 +26,26 @@ if (-not (Test-Path -LiteralPath $renderer)) {
 Assert-EasyProtocolPythonModule -ModuleName 'yaml' -PackageName 'pyyaml'
 
 $resolvedConfigPath = Resolve-EasyProtocolPath -Path $ConfigPath
+$resolveOutputPath = {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return $Path
+    }
+
+    return (Join-Path (Get-EasyProtocolRepoRoot) $Path)
+}
 $args = @($renderer, '--root-config', $resolvedConfigPath)
 if ($ServiceBase) {
-    $args += @('--service-output', (Join-Path (Get-EasyProtocolRepoRoot) $ServiceOutput))
-    $args += @('--service-env-output', (Join-Path (Get-EasyProtocolRepoRoot) $ServiceEnvOutput))
+    $args += @('--service-output', (& $resolveOutputPath -Path $ServiceOutput))
+    $args += @('--service-env-output', (& $resolveOutputPath -Path $ServiceEnvOutput))
 }
 if ($EasyProtocol) {
-    $args += @('--stack-config-output', (Join-Path (Get-EasyProtocolRepoRoot) $StackConfigOutput))
-    $args += @('--stack-env-output', (Join-Path (Get-EasyProtocolRepoRoot) $StackEnvOutput))
+    $args += @('--stack-config-output', (& $resolveOutputPath -Path $StackConfigOutput))
+    $args += @('--stack-env-output', (& $resolveOutputPath -Path $StackEnvOutput))
 }
 
 & python @args
