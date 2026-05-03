@@ -56,3 +56,13 @@ containers. The canonical operator contract is:
 - the gateway container `easy-protocol` inside that project
 - provider child containers such as `easy-protocol-python-001` inside that
   same compose project
+
+When provider child scaling is enabled, the gateway itself is responsible for
+creating and removing those numbered provider containers at runtime. Do not
+regress this back to "gateway stays fixed, but scales only by launching local
+child processes inside the gateway container". The intended architecture is:
+
+- `easy-protocol` holds the scaling policy
+- sibling provider containers are the scaling unit
+- the gateway needs access to `/var/run/docker.sock` so it can manage those
+  sibling containers directly

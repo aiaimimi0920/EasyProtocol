@@ -72,3 +72,60 @@ provider_pool:
       warm_replicas: 0
       idle_scale_down_seconds: 120s
       acquire_timeout: 30s
+managed_provider_runtime:
+  enabled: true
+  docker_host: unix:///var/run/docker.sock
+  compose_project: easy-protocol
+  network_name: EasyAiMi
+  providers:
+    python:
+      enabled: true
+      image: easy-protocol/easy-protocol-python:local
+      service_name_prefix: PythonProtocol
+      container_name_prefix: easy-protocol-python
+      endpoint_host_prefix: easy-protocol-python
+      port: 9100
+      published_port_base: 11003
+      supported_operations:
+      - codex.semantic.step
+      environment:
+        PYTHONUNBUFFERED: '1'
+        PYTHON_PROTOCOL_HOST: 0.0.0.0
+        PYTHON_PROTOCOL_PORT: '9100'
+        PYTHON_PROTOCOL_MIN_WARM_WORKERS: '1'
+        PYTHON_PROTOCOL_MAX_WORKERS: '1'
+        PYTHON_PROTOCOL_IDLE_TIMEOUT_SECONDS: '3600'
+        PYTHON_PROTOCOL_TASK_TIMEOUT_SECONDS: '1800'
+        PYTHON_PROTOCOL_ACQUIRE_TIMEOUT_SECONDS: '60'
+        PYTHON_PROTOCOL_MAX_TASKS_PER_WORKER: '1000'
+        PYTHON_PROTOCOL_REAPER_INTERVAL_SECONDS: '30'
+        MAILBOX_SERVICE_BASE_URL: http://easy-email:8080
+        MAILBOX_SERVICE_API_KEY: ''
+        CAPTCHA_SERVICE_BASE_URL: ''
+        MAILBOX_SERVICE_REQUEST_ATTEMPTS: '8'
+        EASY_PROXY_BASE_URL: http://easy-proxy:29888
+        EASY_PROXY_API_KEY: ''
+        REGISTER_ENABLE_EASY_PROXY: 'true'
+        REGISTER_REQUIRE_EASY_PROXY: 'true'
+        REGISTER_TEAM_AUTH_DIR: /shared/team-auth
+        REGISTER_TEAM_AUTH_GLOB: '*-team.json'
+        REGISTER_TEAM_CAPACITY_LIMIT: '9'
+        REGISTER_TEAM_INVITE_SWEEP_AGE_SECONDS: '180'
+        REGISTER_FREE_MANUAL_OAUTH_PRESERVE_ENABLED: 'false'
+        REGISTER_R2_ACCESS_KEY_ID: ''
+        REGISTER_R2_SECRET_ACCESS_KEY: ''
+        REGISTER_R2_ACCOUNT_ID: ''
+        REGISTER_R2_BUCKET: ''
+        REGISTER_R2_ENDPOINT_URL: ''
+        REGISTER_R2_REGION: auto
+        REGISTER_R2_PUBLIC_BASE_URL: ''
+      host_mounts:
+      - source: C:/EasyProtocol/register-output
+        target: /shared/register-output
+        read_only: false
+      - source: C:/EasyProtocol/team-auth
+        target: /shared/team-auth
+        read_only: true
+      - source: C:/Users/Public/.cli-proxy-api/team
+        target: /shared/local-team-store
+        read_only: false

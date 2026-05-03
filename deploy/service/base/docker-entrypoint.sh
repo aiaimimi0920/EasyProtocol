@@ -79,7 +79,12 @@ start_runtime() {
 
   if [ "$(id -u)" = "0" ]; then
     chown -R easy:easy "$STATE_DIR" "$(dirname "$CONFIG_PATH")" /opt/easy-protocol
-    gosu easy /usr/local/bin/easy_protocol &
+    if [ -S /var/run/docker.sock ]; then
+      echo "[easy-protocol] docker socket detected, keeping gateway runtime on root for managed child containers"
+      /usr/local/bin/easy_protocol &
+    else
+      gosu easy /usr/local/bin/easy_protocol &
+    fi
   else
     /usr/local/bin/easy_protocol &
   fi

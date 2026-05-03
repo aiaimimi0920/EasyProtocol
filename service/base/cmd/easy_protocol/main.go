@@ -26,12 +26,23 @@ func main() {
 	for _, service := range cfg.Services {
 		reg.Register(registry.NewService(service.Name, service.Language, service.Endpoint, service.Enabled, service.SupportedOperations))
 	}
-	providerPool := services.NewProviderProcessPool(cfg, reg)
-	if providerPool != nil {
-		if err := providerPool.Start(context.Background()); err != nil {
-			log.Fatalf("failed to start provider process pool: %v", err)
+	var providerPool transports.LeaseManager
+	containerPool := services.NewProviderContainerPool(cfg, reg)
+	if containerPool != nil {
+		if err := containerPool.Start(context.Background()); err != nil {
+			log.Fatalf("failed to start provider container pool: %v", err)
 		}
-		defer providerPool.Close()
+		defer containerPool.Close()
+		providerPool = containerPool
+	} else {
+		processPool := services.NewProviderProcessPool(cfg, reg)
+		if processPool != nil {
+			if err := processPool.Start(context.Background()); err != nil {
+				log.Fatalf("failed to start provider process pool: %v", err)
+			}
+			defer processPool.Close()
+			providerPool = processPool
+		}
 	}
 	refresher := registry.NewHTTPRefresher(reg)
 	_ = refresher.RefreshAll(context.Background())

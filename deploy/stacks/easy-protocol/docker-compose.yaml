@@ -118,6 +118,7 @@ services:
     volumes:
       - ./generated/easy-protocol.config.yaml:/etc/easy-protocol/config.yaml
       - ./data/easy-protocol:/var/lib/easy-protocol
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       Easy:
         aliases:

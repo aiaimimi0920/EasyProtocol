@@ -17,6 +17,7 @@ services:
     volumes:
       - ${EASY_PROTOCOL_SERVICE_CONFIG_DIR:-./config}:/etc/easy-protocol
       - ${EASY_PROTOCOL_SERVICE_DATA_DIR:-./data}:/var/lib/easy-protocol
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       easyprotocol_service_network:
         aliases:

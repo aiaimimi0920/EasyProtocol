@@ -164,6 +164,50 @@ function Set-EnvFileVariable {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
 }
 
+function Update-ManagedProviderRuntimeImages {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigPath,
+        [Parameter(Mandatory = $true)]
+        [array]$ProviderRuntimePlans
+    )
+
+    Assert-EasyProtocolPythonModule -ModuleName 'yaml' -PackageName 'pyyaml'
+    $resolvedConfigPath = Resolve-EasyProtocolPath -Path $ConfigPath
+    $plansJson = $ProviderRuntimePlans | ConvertTo-Json -Depth 10 -Compress
+    $plansJsonBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($plansJson))
+    $script = @"
+import base64
+import json
+import pathlib
+import yaml
+
+config_path = pathlib.Path(r'''$resolvedConfigPath''')
+payload = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+managed = payload.setdefault('managed_provider_runtime', {})
+providers = managed.setdefault('providers', {})
+plans_json = base64.b64decode(r'''$plansJsonBase64''').decode('utf-8')
+loaded = json.loads(plans_json)
+if isinstance(loaded, dict):
+    if 'providerKey' in loaded:
+        loaded = [loaded]
+    else:
+        loaded = list(loaded.values())
+for item in loaded:
+    provider_key = str(item.get('providerKey') or '').strip()
+    image = str(item.get('image') or '').strip()
+    if not provider_key or not image:
+        continue
+    provider = providers.setdefault(provider_key, {})
+    provider['image'] = image
+config_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=False), encoding='utf-8')
+"@
+    & python -c $script
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to update managed provider runtime images in $resolvedConfigPath"
+    }
+}
+
 function Resolve-ProviderPublishedImageName {
     param(
         [Parameter(Mandatory = $true)]
@@ -394,6 +438,7 @@ function Write-IsolatedComposeFile {
     $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterOutputDirHost) + ':/shared/register-output')))
     $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterTeamAuthDirHost) + ':/shared/team-auth:ro')))
     $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterTeamLocalDirHost) + ':/shared/local-team-store')))
+    $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value '/var/run/docker.sock:/var/run/docker.sock'))
     $lines.Add('    networks:')
     $lines.Add('      easy_network:')
     $lines.Add('        aliases:')
@@ -695,6 +740,7 @@ $gatewayConfigText = Get-Content -Raw -LiteralPath $renderedGatewayConfigPath
 $gatewayConfigText = $gatewayConfigText -replace 'http://python-protocol-manager:9100', "http://$managerAlias`:9100"
 $gatewayConfigText = $gatewayConfigText -replace 'http://easy-protocol-python:9100', "http://$managerAlias`:9100"
 Set-Content -LiteralPath $gatewayConfigPath -Value $gatewayConfigText -Encoding UTF8
+Update-ManagedProviderRuntimeImages -ConfigPath $gatewayConfigPath -ProviderRuntimePlans $providerRuntimePlans
 
 $renderedEnvPath = Join-Path $repoRoot 'deploy/stacks/easy-protocol/generated/stack.env'
 Copy-Item -LiteralPath $renderedEnvPath -Destination $envFile -Force

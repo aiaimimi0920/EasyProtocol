@@ -184,6 +184,83 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
     return services
 
 
+def _build_managed_provider_host_mounts(provider_key: str, provider: dict[str, Any]) -> list[dict[str, Any]]:
+    if provider_key != "python":
+        return []
+    host_mounts = get_dict(provider, "hostMounts")
+    mount_specs = (
+        ("registerOutputDirHost", "/shared/register-output", False),
+        ("registerTeamAuthDirHost", "/shared/team-auth", True),
+        ("registerTeamLocalDirHost", "/shared/local-team-store", False),
+    )
+    mounts: list[dict[str, Any]] = []
+    for source_key, target, read_only in mount_specs:
+        source = str(host_mounts.get(source_key) or "").strip()
+        if not source:
+            continue
+        mounts.append(
+            {
+                "source": source,
+                "target": target,
+                "read_only": read_only,
+            }
+        )
+    return mounts
+
+
+def build_managed_provider_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
+    providers_cfg = get_dict(root_config, "providers")
+    service_base = get_dict(root_config, "serviceBase")
+    runtime_cfg = get_dict(service_base, "runtime")
+    provider_pool = get_dict(runtime_cfg, "provider_pool")
+    if not provider_pool:
+        provider_pool = get_dict(runtime_cfg, "providerPool")
+    pool_providers = get_dict(provider_pool, "providers")
+    stack = get_dict(get_dict(root_config, "stack"), "easyProtocol")
+    network_name = str(stack.get("networkName") or "EasyAiMi")
+    python_published_port = int(
+        stack.get("pythonManagerPublishedPort")
+        or stack.get("pythonPrimaryPublishedPort")
+        or 11003
+    )
+
+    runtime: dict[str, Any] = {
+        "enabled": True,
+        "docker_host": "unix:///var/run/docker.sock",
+        "compose_project": "easy-protocol",
+        "network_name": network_name,
+        "providers": {},
+    }
+
+    for provider_key, defaults in (
+        ("python", ("PythonProtocol", "easy-protocol-python", 9100, python_published_port)),
+        ("go", ("GolangProtocol", "easy-protocol-go", 9100, 0)),
+        ("javascript", ("JSProtocol", "easy-protocol-javascript", 9100, 0)),
+        ("rust", ("RustProtocol", "easy-protocol-rust", 9100, 0)),
+    ):
+        provider = get_dict(providers_cfg, provider_key)
+        registry = get_dict(provider, "registry")
+        if not registry or not registry.get("enabled", False):
+            continue
+        service_name_prefix_default, container_prefix_default, port_default, published_port_default = defaults
+        runtime["providers"][provider_key] = {
+            "enabled": True,
+            "image": str(provider.get("image") or "").strip(),
+            "service_name_prefix": str(registry.get("serviceNamePrefix") or service_name_prefix_default).strip() or service_name_prefix_default,
+            "container_name_prefix": str(registry.get("endpointHostPrefix") or container_prefix_default).strip() or container_prefix_default,
+            "endpoint_host_prefix": str(registry.get("endpointHostPrefix") or container_prefix_default).strip() or container_prefix_default,
+            "port": int(registry.get("port", port_default) or port_default),
+            "published_port_base": int(registry.get("publishedPortBase", published_port_default) or published_port_default),
+            "supported_operations": list(registry.get("supportedOperations") or []),
+            "environment": {
+                str(key): str(value)
+                for key, value in get_dict(provider, "containerEnvironment").items()
+            },
+            "host_mounts": _build_managed_provider_host_mounts(provider_key, provider),
+        }
+    return runtime
+
+
 def build_service_base_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
     template = load_yaml(SERVICE_TEMPLATE_PATH)
     service_base = get_dict(root_config, "serviceBase")
@@ -207,6 +284,7 @@ def build_service_base_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
     generated_services = generate_registry_services(root_config)
     if generated_services:
         merged["services"] = generated_services
+    merged["managed_provider_runtime"] = build_managed_provider_runtime(root_config)
     return merged
 
 

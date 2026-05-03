@@ -26,16 +26,17 @@ const (
 )
 
 type Config struct {
-	Mode             ExecutionMode          `yaml:"mode"`
-	LogLevel         string                 `yaml:"log_level"`
-	ProviderPool     ProviderPoolConfig     `yaml:"provider_pool"`
-	UnifiedAPI       UnifiedAPIConfig       `yaml:"unified_api"`
-	ControlPlane     ControlPlaneConfig     `yaml:"control_plane"`
-	Strategy         StrategyConfig         `yaml:"strategy"`
-	ErrorAttribution ErrorAttributionConfig `yaml:"error_attribution"`
-	Tracing          TracingConfig          `yaml:"tracing"`
-	Persistence      PersistenceConfig      `yaml:"persistence"`
-	Services         []ServiceConfig        `yaml:"services"`
+	Mode                   ExecutionMode                `yaml:"mode"`
+	LogLevel               string                       `yaml:"log_level"`
+	ProviderPool           ProviderPoolConfig           `yaml:"provider_pool"`
+	ManagedProviderRuntime ManagedProviderRuntimeConfig `yaml:"managed_provider_runtime"`
+	UnifiedAPI             UnifiedAPIConfig             `yaml:"unified_api"`
+	ControlPlane           ControlPlaneConfig           `yaml:"control_plane"`
+	Strategy               StrategyConfig               `yaml:"strategy"`
+	ErrorAttribution       ErrorAttributionConfig       `yaml:"error_attribution"`
+	Tracing                TracingConfig                `yaml:"tracing"`
+	Persistence            PersistenceConfig            `yaml:"persistence"`
+	Services               []ServiceConfig              `yaml:"services"`
 }
 
 type UnifiedAPIConfig struct {
@@ -52,6 +53,33 @@ type ProviderPoolProviderConfig struct {
 	MaxReplicas          int           `yaml:"max_replicas"`
 	IdleScaleDownSeconds time.Duration `yaml:"idle_scale_down_seconds"`
 	AcquireTimeout       time.Duration `yaml:"acquire_timeout"`
+}
+
+type ManagedProviderRuntimeConfig struct {
+	Enabled        bool                                      `yaml:"enabled"`
+	DockerHost     string                                    `yaml:"docker_host"`
+	ComposeProject string                                    `yaml:"compose_project"`
+	NetworkName    string                                    `yaml:"network_name"`
+	Providers      map[string]ManagedProviderContainerConfig `yaml:"providers"`
+}
+
+type ManagedProviderContainerConfig struct {
+	Enabled             bool                             `yaml:"enabled"`
+	Image               string                           `yaml:"image"`
+	ServiceNamePrefix   string                           `yaml:"service_name_prefix"`
+	ContainerNamePrefix string                           `yaml:"container_name_prefix"`
+	EndpointHostPrefix  string                           `yaml:"endpoint_host_prefix"`
+	Port                int                              `yaml:"port"`
+	PublishedPortBase   int                              `yaml:"published_port_base"`
+	SupportedOperations []string                         `yaml:"supported_operations"`
+	Environment         map[string]string                `yaml:"environment"`
+	HostMounts          []ManagedProviderHostMountConfig `yaml:"host_mounts"`
+}
+
+type ManagedProviderHostMountConfig struct {
+	Source   string `yaml:"source"`
+	Target   string `yaml:"target"`
+	ReadOnly bool   `yaml:"read_only"`
 }
 
 type ControlPlaneConfig struct {
@@ -145,6 +173,13 @@ func DefaultConfig() Config {
 				},
 			},
 		},
+		ManagedProviderRuntime: ManagedProviderRuntimeConfig{
+			Enabled:        false,
+			DockerHost:     "unix:///var/run/docker.sock",
+			ComposeProject: "easy-protocol",
+			NetworkName:    "EasyAiMi",
+			Providers:      map[string]ManagedProviderContainerConfig{},
+		},
 		UnifiedAPI: UnifiedAPIConfig{
 			Listen:   "0.0.0.0:9788",
 			Password: "123456",
@@ -230,8 +265,8 @@ func DefaultConfig() Config {
 			SnapshotLimit:         200,
 		},
 		Services: []ServiceConfig{
-            {Name: "GolangProtocol-001", Language: "go", Endpoint: "http://easy-protocol-go-001:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.headers.normalize", "protocol.query.encode", "protocol.hash.sha256"}},
-            {Name: "JSProtocol-001", Language: "javascript", Endpoint: "http://easy-protocol-javascript-001:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.template.render", "protocol.json.compact", "protocol.query.encode", "protocol.regex.extract"}},
+			{Name: "GolangProtocol-001", Language: "go", Endpoint: "http://easy-protocol-go-001:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.headers.normalize", "protocol.query.encode", "protocol.hash.sha256"}},
+			{Name: "JSProtocol-001", Language: "javascript", Endpoint: "http://easy-protocol-javascript-001:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.template.render", "protocol.json.compact", "protocol.query.encode", "protocol.regex.extract"}},
 			{Name: "PythonProtocol-001", Language: "python", Endpoint: "http://easy-protocol-python-001:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.regex.extract", "protocol.text.slugify", "protocol.data.flatten", "codex.semantic.step"}},
 			{Name: "PythonProtocol-002", Language: "python", Endpoint: "http://easy-protocol-python-002:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.regex.extract", "protocol.text.slugify", "protocol.data.flatten", "codex.semantic.step"}},
 			{Name: "PythonProtocol-003", Language: "python", Endpoint: "http://easy-protocol-python-003:9100", Enabled: true, SupportedOperations: []string{"health.inspect", "protocol.echo", "protocol.regex.extract", "protocol.text.slugify", "protocol.data.flatten", "codex.semantic.step"}},
@@ -280,6 +315,34 @@ func (c *Config) Normalize() {
 			item.AcquireTimeout = 30 * time.Second
 		}
 		c.ProviderPool.Providers[strings.TrimSpace(providerID)] = item
+	}
+	if strings.TrimSpace(c.ManagedProviderRuntime.DockerHost) == "" {
+		c.ManagedProviderRuntime.DockerHost = "unix:///var/run/docker.sock"
+	}
+	if strings.TrimSpace(c.ManagedProviderRuntime.ComposeProject) == "" {
+		c.ManagedProviderRuntime.ComposeProject = "easy-protocol"
+	}
+	if strings.TrimSpace(c.ManagedProviderRuntime.NetworkName) == "" {
+		c.ManagedProviderRuntime.NetworkName = "EasyAiMi"
+	}
+	if c.ManagedProviderRuntime.Providers == nil {
+		c.ManagedProviderRuntime.Providers = map[string]ManagedProviderContainerConfig{}
+	}
+	for providerID, item := range c.ManagedProviderRuntime.Providers {
+		normalizedProviderID := strings.TrimSpace(providerID)
+		if normalizedProviderID == "" {
+			continue
+		}
+		if item.Port <= 0 {
+			item.Port = 9100
+		}
+		if item.Environment == nil {
+			item.Environment = map[string]string{}
+		}
+		if item.HostMounts == nil {
+			item.HostMounts = []ManagedProviderHostMountConfig{}
+		}
+		c.ManagedProviderRuntime.Providers[normalizedProviderID] = item
 	}
 	if c.UnifiedAPI.Listen == "" {
 		c.UnifiedAPI.Listen = "0.0.0.0:9788"
@@ -400,4 +463,3 @@ func normalizeOperationPolicies(policies map[string]OperationPolicyConfig) map[s
 	}
 	return normalized
 }
-

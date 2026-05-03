@@ -76,6 +76,15 @@ The scaling unit now belongs to the EasyProtocol manager layer:
 - child count is expressed through the root operator config
 - Python child containers are execution lanes, not the main scaling authority
 
+The gateway now owns runtime scale-up and scale-down of sibling provider
+containers inside the same `easy-protocol` compose project. That means:
+
+- `easy-protocol` keeps the warm floor
+- when demand rises, it creates additional containers such as
+  `easy-protocol-python-002` and `easy-protocol-python-003`
+- when demand falls, it removes surplus child containers back down to the
+  configured warm floor
+
 The Python child still keeps one local isolated execution lane internally, but
 the public architecture should treat provider child replica count as the main
 place for warm capacity, max concurrency, and idle scale-down.
@@ -212,6 +221,8 @@ What the root deploy script does:
 - keeps the gateway container `easy-protocol` inside that compose project
 - keeps numbered provider child containers such as
   `easy-protocol-python-001` inside the same compose project
+- mounts `/var/run/docker.sock` into the gateway so `easy-protocol` can manage
+  sibling provider containers at runtime
 
 You can still use the lower-level helpers directly when needed:
 
