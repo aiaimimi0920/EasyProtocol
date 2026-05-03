@@ -58,10 +58,17 @@ provider_pool:
     python:
       warm_replicas: 1
       max_replicas: 4
-      idle_scale_down_seconds: 120
+      idle_scale_down_seconds: 120s
+      acquire_timeout: 30s
     go:
       warm_replicas: 0
+      idle_scale_down_seconds: 120s
+      acquire_timeout: 30s
     javascript:
       warm_replicas: 0
+      idle_scale_down_seconds: 120s
+      acquire_timeout: 30s
     rust:
       warm_replicas: 0
+      idle_scale_down_seconds: 120s
+      acquire_timeout: 30s
