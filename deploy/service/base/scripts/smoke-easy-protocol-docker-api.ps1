@@ -31,7 +31,20 @@ if ($HostPort -le 0) {
 
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
-Copy-Item -LiteralPath $resolvedConfigPath -Destination (Join-Path $configDir "config.yaml") -Force
+$smokeConfigPath = Join-Path $configDir "config.yaml"
+Copy-Item -LiteralPath $resolvedConfigPath -Destination $smokeConfigPath -Force
+@'
+from pathlib import Path
+import yaml
+
+path = Path(r"__SMOKE_CONFIG_PATH__")
+data = yaml.safe_load(path.read_text(encoding="utf-8"))
+provider_pool = (((data.get("serviceBase") or {}).get("runtime") or {}).get("provider_pool") or {}).get("providers") or {}
+for family in provider_pool.values():
+    if isinstance(family, dict) and "warm_replicas" in family:
+        family["warm_replicas"] = 0
+path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+'@.Replace('__SMOKE_CONFIG_PATH__', $smokeConfigPath.Replace('\', '\\')) | python -
 
 try {
   $dockerArgs = @(
