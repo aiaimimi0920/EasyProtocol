@@ -213,6 +213,11 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertEqual(endpoints.get("JSProtocol-001"), "http://easy-protocol-javascript-001:9100")
             self.assertEqual(endpoints.get("RustProtocol-001"), "http://easy-protocol-rust-001:9100")
 
+    def test_isolated_instance_deploy_uses_single_easy_protocol_compose_project(self):
+        content = (REPO_ROOT / "scripts" / "deploy-isolated-easyprotocol-instance.ps1").read_text(encoding="utf-8")
+        self.assertIn("docker compose -p easy-protocol", content)
+        self.assertIn('$gatewayContainerName = "easy-protocol"', content)
+
 
 if __name__ == "__main__":
     unittest.main()

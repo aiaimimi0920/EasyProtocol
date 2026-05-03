@@ -292,6 +292,118 @@ function Write-ProviderEnvFile {
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
 }
 
+function ConvertTo-ComposePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return ($Path -replace '\\', '/')
+}
+
+function ConvertTo-YamlSingleQuoted {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Write-IsolatedComposeFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$GatewayContainerName,
+        [Parameter(Mandatory = $true)]
+        [string]$GatewayImage,
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigDir,
+        [Parameter(Mandatory = $true)]
+        [string]$DataDir,
+        [Parameter(Mandatory = $true)]
+        [int]$GatewayHostPort,
+        [Parameter(Mandatory = $true)]
+        [array]$ProviderRuntimePlans,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$ProviderEnvFiles,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterOutputDirHost,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterTeamAuthDirHost,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterTeamLocalDirHost,
+        [Parameter(Mandatory = $true)]
+        [string]$SelectedPythonContainerName,
+        [Parameter(Mandatory = $true)]
+        [int]$PythonManagerHostPort
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('services:')
+    foreach ($providerPlan in $ProviderRuntimePlans) {
+        $serviceName = [string]$providerPlan.containerName
+        $lines.Add("  ${serviceName}:")
+        $lines.Add("    image: " + (ConvertTo-YamlSingleQuoted -Value ([string]$providerPlan.image)))
+        $lines.Add("    container_name: " + (ConvertTo-YamlSingleQuoted -Value $serviceName))
+        $lines.Add('    restart: unless-stopped')
+        $envFilePath = [string]$ProviderEnvFiles[$serviceName]
+        if (-not [string]::IsNullOrWhiteSpace($envFilePath)) {
+            $lines.Add('    env_file:')
+            $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value (ConvertTo-ComposePath -Path $envFilePath)))
+        }
+        if ($providerPlan.providerKey -eq 'python') {
+            $lines.Add('    volumes:')
+            $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterOutputDirHost) + ':/shared/register-output')))
+            $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterTeamAuthDirHost) + ':/shared/team-auth:ro')))
+            $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $RegisterTeamLocalDirHost) + ':/shared/local-team-store')))
+        }
+        if ($serviceName -eq $SelectedPythonContainerName) {
+            $lines.Add('    ports:')
+            $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ("${PythonManagerHostPort}:9100")))
+        }
+        $lines.Add('    networks:')
+        $lines.Add('      easy_network:')
+        $lines.Add('        aliases:')
+        $lines.Add("          - " + (ConvertTo-YamlSingleQuoted -Value ([string]$providerPlan.endpointAlias)))
+        if ([string]$providerPlan.endpointAlias -ne $serviceName) {
+            $lines.Add("          - " + (ConvertTo-YamlSingleQuoted -Value $serviceName))
+        }
+    }
+
+    $lines.Add("  ${GatewayContainerName}:")
+    $lines.Add("    image: " + (ConvertTo-YamlSingleQuoted -Value $GatewayImage))
+    $lines.Add("    container_name: " + (ConvertTo-YamlSingleQuoted -Value $GatewayContainerName))
+    $lines.Add('    restart: unless-stopped')
+    if ($ProviderRuntimePlans.Count -gt 0) {
+        $lines.Add('    depends_on:')
+        foreach ($providerPlan in $ProviderRuntimePlans) {
+            $lines.Add("      - " + ([string]$providerPlan.containerName))
+        }
+    }
+    $lines.Add('    ports:')
+    $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ("${GatewayHostPort}:9788")))
+    $lines.Add('    environment:')
+    $lines.Add("      EASY_PROTOCOL_CONFIG_PATH: " + (ConvertTo-YamlSingleQuoted -Value '/etc/easy-protocol/config.yaml'))
+    $lines.Add("      EASY_PROTOCOL_STATE_DIR: " + (ConvertTo-YamlSingleQuoted -Value '/var/lib/easy-protocol'))
+    $lines.Add("      EASY_PROTOCOL_RESET_STORE_ON_BOOT: " + (ConvertTo-YamlSingleQuoted -Value 'false'))
+    $lines.Add('    volumes:')
+    $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $ConfigDir) + ':/etc/easy-protocol')))
+    $lines.Add("      - " + (ConvertTo-YamlSingleQuoted -Value ((ConvertTo-ComposePath -Path $DataDir) + ':/var/lib/easy-protocol')))
+    $lines.Add('    networks:')
+    $lines.Add('      easy_network:')
+    $lines.Add('        aliases:')
+    $lines.Add("          - " + (ConvertTo-YamlSingleQuoted -Value $GatewayContainerName))
+
+    $lines.Add('networks:')
+    $lines.Add('  easy_network:')
+    $lines.Add("    name: " + (ConvertTo-YamlSingleQuoted -Value 'EasyAiMi'))
+    $lines.Add('    external: true')
+
+    Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
+}
+
 function Get-EnabledProviderRuntimePlans {
     param(
         [Parameter(Mandatory = $true)]
@@ -609,6 +721,7 @@ if ($existingContainers -contains $gatewayContainerName) {
     }
 }
 
+$providerEnvFiles = @{}
 foreach ($providerPlan in $providerRuntimePlans) {
     $providerEnvFile = if ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix) {
         $envFile
@@ -619,48 +732,29 @@ foreach ($providerPlan in $providerRuntimePlans) {
     if (-not ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix)) {
         Write-ProviderEnvFile -Path $providerEnvFile -EnvMap $providerPlan.envMap
     }
-
-    $dockerArgs = @(
-        'run', '-d',
-        '--name', [string]$providerPlan.containerName,
-        '--network', 'EasyAiMi',
-        '--network-alias', [string]$providerPlan.endpointAlias,
-        '--network-alias', [string]$providerPlan.containerName
-    )
-
-    if ($providerPlan.providerKey -eq 'python' -and $providerPlan.replicaSuffix -eq $pythonReplicaSuffix) {
-        $dockerArgs += @('-p', "${PythonManagerHostPort}:9100")
-    }
-
-    $dockerArgs += @('--env-file', $providerEnvFile)
-
-    if ($providerPlan.providerKey -eq 'python') {
-        $dockerArgs += @('-v', "${registerOutputDirHost}:/shared/register-output")
-        $dockerArgs += @('-v', "${registerTeamAuthDirHost}:/shared/team-auth:ro")
-        $dockerArgs += @('-v', "${registerTeamLocalDirHost}:/shared/local-team-store")
-    }
-
-    $dockerArgs += [string]$providerPlan.image
-    docker @dockerArgs | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to start isolated provider container: $($providerPlan.containerName)"
-    }
+    $providerEnvFiles[[string]$providerPlan.containerName] = $providerEnvFile
 }
 
-docker run -d `
-    --name $gatewayContainerName `
-    --network EasyAiMi `
-    --network-alias "easy-protocol" `
-    --network-alias $gatewayContainerName `
-    -p "${GatewayHostPort}:9788" `
-    -e EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml `
-    -e EASY_PROTOCOL_STATE_DIR=/var/lib/easy-protocol `
-    -e EASY_PROTOCOL_RESET_STORE_ON_BOOT=false `
-    -v "${configDir}:/etc/easy-protocol" `
-    -v "${dataDir}:/var/lib/easy-protocol" `
-    $(if ($useGhcrImages) { $GatewayImage } else { 'easy-protocol/easy-protocol:local' }) | Out-Null
+$composeFile = Join-Path $instanceRoot 'docker-compose.generated.yaml'
+Write-IsolatedComposeFile `
+    -Path $composeFile `
+    -GatewayContainerName $gatewayContainerName `
+    -GatewayImage $(if ($useGhcrImages) { $GatewayImage } else { 'easy-protocol/easy-protocol:local' }) `
+    -ConfigDir $configDir `
+    -DataDir $dataDir `
+    -GatewayHostPort $GatewayHostPort `
+    -ProviderRuntimePlans $providerRuntimePlans `
+    -ProviderEnvFiles $providerEnvFiles `
+    -RegisterOutputDirHost $registerOutputDirHost `
+    -RegisterTeamAuthDirHost $registerTeamAuthDirHost `
+    -RegisterTeamLocalDirHost $registerTeamLocalDirHost `
+    -SelectedPythonContainerName $managerContainerName `
+    -PythonManagerHostPort $PythonManagerHostPort
+
+docker compose -p easy-protocol -f $composeFile down --remove-orphans | Out-Null
+docker compose -p easy-protocol -f $composeFile up -d | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to start isolated easyprotocol gateway container"
+    throw "Failed to start isolated easyprotocol compose project"
 }
 
 $managerBaseUrl = "http://127.0.0.1:${PythonManagerHostPort}"
