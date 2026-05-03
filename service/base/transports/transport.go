@@ -6,6 +6,14 @@ import (
 	"easy_protocol/api"
 )
 
+type LeaseHandle interface {
+	Release()
+}
+
+type LeaseManager interface {
+	Acquire(ctx context.Context, requestedService string) (string, LeaseHandle, error)
+}
+
 type Result struct {
 	Payload  map[string]any
 	Metadata map[string]string

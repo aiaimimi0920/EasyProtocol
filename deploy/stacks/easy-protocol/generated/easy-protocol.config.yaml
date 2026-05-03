@@ -53,15 +53,15 @@ services:
   enabled: true
   supported_operations:
   - codex.semantic.step
-providerPool:
+provider_pool:
   providers:
     python:
-      warmReplicas: 1
-      maxReplicas: 4
-      idleScaleDownSeconds: 120
+      warm_replicas: 1
+      max_replicas: 4
+      idle_scale_down_seconds: 120
     go:
-      warmReplicas: 0
+      warm_replicas: 0
     javascript:
-      warmReplicas: 0
+      warm_replicas: 0
     rust:
-      warmReplicas: 0
+      warm_replicas: 0

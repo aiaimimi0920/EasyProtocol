@@ -78,6 +78,16 @@ func (r *Registry) Register(service Service) {
 	r.services[service.Name] = service
 }
 
+func (r *Registry) Remove(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.services[name]; !ok {
+		return false
+	}
+	delete(r.services, name)
+	return true
+}
+
 func (r *Registry) UpdateHealth(name string, healthy bool, lastError string, checkedAt time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

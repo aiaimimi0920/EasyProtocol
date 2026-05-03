@@ -28,6 +28,7 @@ const (
 type Config struct {
 	Mode             ExecutionMode          `yaml:"mode"`
 	LogLevel         string                 `yaml:"log_level"`
+	ProviderPool     ProviderPoolConfig     `yaml:"provider_pool"`
 	UnifiedAPI       UnifiedAPIConfig       `yaml:"unified_api"`
 	ControlPlane     ControlPlaneConfig     `yaml:"control_plane"`
 	Strategy         StrategyConfig         `yaml:"strategy"`
@@ -40,6 +41,17 @@ type Config struct {
 type UnifiedAPIConfig struct {
 	Listen   string `yaml:"listen"`
 	Password string `yaml:"password"`
+}
+
+type ProviderPoolConfig struct {
+	Providers map[string]ProviderPoolProviderConfig `yaml:"providers"`
+}
+
+type ProviderPoolProviderConfig struct {
+	WarmReplicas         int           `yaml:"warm_replicas"`
+	MaxReplicas          int           `yaml:"max_replicas"`
+	IdleScaleDownSeconds time.Duration `yaml:"idle_scale_down_seconds"`
+	AcquireTimeout       time.Duration `yaml:"acquire_timeout"`
 }
 
 type ControlPlaneConfig struct {
@@ -123,6 +135,16 @@ func DefaultConfig() Config {
 	return Config{
 		Mode:     ModeStrategy,
 		LogLevel: "info",
+		ProviderPool: ProviderPoolConfig{
+			Providers: map[string]ProviderPoolProviderConfig{
+				"python": {
+					WarmReplicas:         1,
+					MaxReplicas:          4,
+					IdleScaleDownSeconds: 120 * time.Second,
+					AcquireTimeout:       30 * time.Second,
+				},
+			},
+		},
 		UnifiedAPI: UnifiedAPIConfig{
 			Listen:   "0.0.0.0:9788",
 			Password: "123456",
@@ -233,6 +255,31 @@ func (c *Config) Normalize() {
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
+	}
+	if c.ProviderPool.Providers == nil {
+		c.ProviderPool.Providers = map[string]ProviderPoolProviderConfig{}
+	}
+	for providerID, item := range c.ProviderPool.Providers {
+		if item.WarmReplicas < 0 {
+			item.WarmReplicas = 0
+		}
+		if item.MaxReplicas <= 0 {
+			if item.WarmReplicas > 0 {
+				item.MaxReplicas = item.WarmReplicas
+			} else {
+				item.MaxReplicas = 1
+			}
+		}
+		if item.MaxReplicas < item.WarmReplicas {
+			item.MaxReplicas = item.WarmReplicas
+		}
+		if item.IdleScaleDownSeconds <= 0 {
+			item.IdleScaleDownSeconds = 120 * time.Second
+		}
+		if item.AcquireTimeout <= 0 {
+			item.AcquireTimeout = 30 * time.Second
+		}
+		c.ProviderPool.Providers[strings.TrimSpace(providerID)] = item
 	}
 	if c.UnifiedAPI.Listen == "" {
 		c.UnifiedAPI.Listen = "0.0.0.0:9788"

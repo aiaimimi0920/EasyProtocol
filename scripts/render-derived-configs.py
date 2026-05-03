@@ -131,7 +131,9 @@ def generate_registry_services(root_config: dict[str, Any]) -> list[dict[str, An
     providers = get_dict(root_config, "providers")
     service_base = get_dict(root_config, "serviceBase")
     runtime_cfg = get_dict(service_base, "runtime")
-    provider_pool = get_dict(runtime_cfg, "providerPool")
+    provider_pool = get_dict(runtime_cfg, "provider_pool")
+    if not provider_pool:
+        provider_pool = get_dict(runtime_cfg, "providerPool")
     pool_providers = get_dict(provider_pool, "providers")
     services: list[dict[str, Any]] = []
 

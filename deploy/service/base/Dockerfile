@@ -18,6 +18,8 @@ ENV EASY_PROTOCOL_CONFIG_PATH=/etc/easy-protocol/config.yaml \
     EASY_PROTOCOL_STATE_DIR=/var/lib/easy-protocol
 
 COPY --from=builder /out/easy_protocol /usr/local/bin/easy_protocol
+COPY providers/python/src /opt/easy-protocol/providers/python/src
+COPY providers/python/python_shared /opt/easy-protocol/providers/python/python_shared
 COPY deploy/service/base/config.template.yaml /opt/easy-protocol/config.template.yaml
 COPY deploy/service/base/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY deploy/service/base/bootstrap-service-config.py /usr/local/bin/bootstrap-service-config.py
@@ -26,7 +28,7 @@ COPY scripts/easyprotocol-import-code.py /usr/local/bin/easyprotocol-import-code
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=5 update \
     && apt-get -o Acquire::Retries=5 install -y --fix-missing --no-install-recommends ca-certificates gosu python3 python3-pip \
-    && python3 -m pip install --no-cache-dir --retries 10 --timeout 300 --break-system-packages boto3 pynacl \
+    && python3 -m pip install --no-cache-dir --retries 10 --timeout 300 --break-system-packages boto3 pynacl curl-cffi \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -u 10001 easy \

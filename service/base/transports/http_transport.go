@@ -17,6 +17,7 @@ import (
 type HTTPTransport struct {
 	client   *http.Client
 	registry *registry.Registry
+	leases   LeaseManager
 }
 
 func NewHTTPTransport(reg *registry.Registry) *HTTPTransport {
@@ -24,6 +25,10 @@ func NewHTTPTransport(reg *registry.Registry) *HTTPTransport {
 		client:   &http.Client{Timeout: 10 * time.Minute},
 		registry: reg,
 	}
+}
+
+func (t *HTTPTransport) SetLeaseManager(manager LeaseManager) {
+	t.leases = manager
 }
 
 type serviceResponse struct {
@@ -39,7 +44,26 @@ type serviceResponse struct {
 }
 
 func (t *HTTPTransport) Call(ctx context.Context, service string, request api.Request) (Result, error) {
-	entry, ok := t.registry.Get(service)
+	releaseHandle := LeaseHandle(nil)
+	selectedService := service
+	if t.leases != nil {
+		acquiredService, handle, err := t.leases.Acquire(ctx, service)
+		if err != nil {
+			return Result{}, &ServiceCallError{
+				Category: attribution.CategoryServiceUnavailable,
+				Message:  fmt.Sprintf("acquire managed service lease: %v", err),
+			}
+		}
+		if acquiredService != "" {
+			selectedService = acquiredService
+		}
+		releaseHandle = handle
+	}
+	if releaseHandle != nil {
+		defer releaseHandle.Release()
+	}
+
+	entry, ok := t.registry.Get(selectedService)
 	if !ok {
 		return Result{}, &ServiceCallError{
 			Category: attribution.CategoryServiceNotFound,
@@ -120,6 +144,7 @@ func (t *HTTPTransport) Call(ctx context.Context, service string, request api.Re
 		Payload: payload.Result,
 		Metadata: map[string]string{
 			"service": payload.Service,
+			"selected_service": selectedService,
 		},
 	}, nil
 }

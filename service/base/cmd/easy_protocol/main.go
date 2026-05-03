@@ -26,6 +26,13 @@ func main() {
 	for _, service := range cfg.Services {
 		reg.Register(registry.NewService(service.Name, service.Language, service.Endpoint, service.Enabled, service.SupportedOperations))
 	}
+	providerPool := services.NewProviderProcessPool(cfg, reg)
+	if providerPool != nil {
+		if err := providerPool.Start(context.Background()); err != nil {
+			log.Fatalf("failed to start provider process pool: %v", err)
+		}
+		defer providerPool.Close()
+	}
 	refresher := registry.NewHTTPRefresher(reg)
 	_ = refresher.RefreshAll(context.Background())
 
@@ -68,6 +75,9 @@ func main() {
 		initialControlPlaneState.LastMaintenanceSummary = state.LastMaintenanceSummary
 	}
 	transport := transports.NewHTTPTransport(reg)
+	if providerPool != nil {
+		transport.SetLeaseManager(providerPool)
+	}
 	dispatcher := services.NewDispatcher(cfg, reg, refresher, coolingMgr, attributionMgr, statsMgr, traceStore, transport)
 	if state, err := runtimeStore.Load(); err != nil {
 		log.Fatalf("failed to load runtime state: %v", err)
