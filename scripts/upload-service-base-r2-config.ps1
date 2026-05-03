@@ -40,8 +40,15 @@ if ([string]::IsNullOrWhiteSpace($ManifestObjectKey)) {
 }
 
 $resolvedConfigPath = Resolve-EasyProtocolPath -Path $ConfigPath
-$renderServiceOutput = Join-Path $env:TEMP ("easyprotocol-service-base-runtime-config-{0}.yaml" -f [guid]::NewGuid().ToString('N'))
-$renderEnvOutput = Join-Path $env:TEMP ("easyprotocol-service-base-runtime-env-{0}.env" -f [guid]::NewGuid().ToString('N'))
+$tempRoot = [string]$env:TEMP
+if ([string]::IsNullOrWhiteSpace($tempRoot)) {
+    $tempRoot = [System.IO.Path]::GetTempPath()
+}
+if ([string]::IsNullOrWhiteSpace($tempRoot)) {
+    throw "Unable to resolve a temporary directory for rendering service/base config."
+}
+$renderServiceOutput = Join-Path $tempRoot ("easyprotocol-service-base-runtime-config-{0}.yaml" -f [guid]::NewGuid().ToString('N'))
+$renderEnvOutput = Join-Path $tempRoot ("easyprotocol-service-base-runtime-env-{0}.env" -f [guid]::NewGuid().ToString('N'))
 
 try {
     & (Join-Path $PSScriptRoot 'render-derived-configs.ps1') `
