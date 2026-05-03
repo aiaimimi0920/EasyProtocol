@@ -33,6 +33,7 @@ param(
     [string]$RegisterTeamAuthDirHost = "",
     [string]$RegisterTeamLocalDirHost = "",
     [string]$MailboxServiceApiKey = "",
+    [string]$EasyProxyApiKey = "",
     [string]$RepoOwner = "aiaimimi0920",
     [string]$RepoName = "EasyProtocol",
     [string]$RepoRef = "main",
@@ -262,5 +263,6 @@ if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @("-Re
 if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @("-RegisterTeamAuthDirHost", $RegisterTeamAuthDirHost) }
 if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @("-RegisterTeamLocalDirHost", $RegisterTeamLocalDirHost) }
 if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @("-MailboxServiceApiKey", $MailboxServiceApiKey) }
+if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $args += @("-EasyProxyApiKey", $EasyProxyApiKey) }
 
 & powershell @args

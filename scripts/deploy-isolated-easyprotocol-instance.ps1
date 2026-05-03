@@ -9,6 +9,7 @@ param(
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
     [string]$MailboxServiceApiKey = '',
+    [string]$EasyProxyApiKey = '',
     [string]$GatewayImage = '',
     [string]$ProviderImage = '',
     [string]$ReleaseTag = '',
@@ -103,6 +104,25 @@ function Find-EasyEmailConfigPath {
     return ''
 }
 
+function Find-EasyProxyConfigPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $gameEditorRoot = Split-Path -Parent $RepoRoot
+    $candidates = @(
+        (Join-Path $gameEditorRoot 'EasyProxy\config.yaml'),
+        (Join-Path $gameEditorRoot 'ProxyService\deploy\EasyProxy\config.yaml')
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
 function Read-EasyEmailServerApiKey {
     param(
         [Parameter(Mandatory = $true)]
@@ -128,6 +148,35 @@ print(str(server.get('apiKey') or ''))
     $apiKey = (& python -c $script)
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to read EasyEmail server apiKey from $resolvedConfigPath"
+    }
+    return [string]$apiKey
+}
+
+function Read-EasyProxyManagementApiKey {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $configPath = Find-EasyProxyConfigPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($configPath)) {
+        return ''
+    }
+
+    Assert-EasyProtocolPythonModule -ModuleName 'yaml' -PackageName 'pyyaml'
+    $resolvedConfigPath = Resolve-EasyProtocolPath -Path $configPath
+    $script = @"
+import pathlib
+import yaml
+payload = yaml.safe_load(pathlib.Path(r'''$resolvedConfigPath''').read_text(encoding='utf-8')) or {}
+service_base = payload.get('serviceBase') if isinstance(payload, dict) else {}
+runtime = service_base.get('runtime') if isinstance(service_base, dict) else {}
+management = runtime.get('management') if isinstance(runtime, dict) else {}
+print(str(management.get('password') or ''))
+"@
+    $apiKey = (& python -c $script)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to read EasyProxy management api key from $resolvedConfigPath"
     }
     return [string]$apiKey
 }
@@ -162,6 +211,53 @@ function Set-EnvFileVariable {
     }
 
     Set-Content -LiteralPath $Path -Value $lines -Encoding UTF8
+}
+
+function Update-ManagedProviderRuntimePythonConfig {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigPath,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterOutputDirHost,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterTeamAuthDirHost,
+        [Parameter(Mandatory = $true)]
+        [string]$RegisterTeamLocalDirHost,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$MailboxServiceApiKey,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$EasyProxyApiKey
+    )
+
+    Assert-EasyProtocolPythonModule -ModuleName 'yaml' -PackageName 'pyyaml'
+    $resolvedConfigPath = Resolve-EasyProtocolPath -Path $ConfigPath
+    $script = @"
+import pathlib
+import yaml
+
+config_path = pathlib.Path(r'''$resolvedConfigPath''')
+payload = yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+managed = payload.setdefault('managed_provider_runtime', {})
+providers = managed.setdefault('providers', {})
+python_cfg = providers.setdefault('python', {})
+env_map = python_cfg.setdefault('environment', {})
+if r'''$MailboxServiceApiKey''':
+    env_map['MAILBOX_SERVICE_API_KEY'] = r'''$MailboxServiceApiKey'''
+if r'''$EasyProxyApiKey''':
+    env_map['EASY_PROXY_API_KEY'] = r'''$EasyProxyApiKey'''
+python_cfg['host_mounts'] = [
+    {'source': r'''$RegisterOutputDirHost''', 'target': '/shared/register-output', 'read_only': False},
+    {'source': r'''$RegisterTeamAuthDirHost''', 'target': '/shared/team-auth', 'read_only': True},
+    {'source': r'''$RegisterTeamLocalDirHost''', 'target': '/shared/local-team-store', 'read_only': False},
+]
+config_path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=False), encoding='utf-8')
+"@
+    & python -c $script
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to update managed provider runtime python config in $resolvedConfigPath"
+    }
 }
 
 function Update-ManagedProviderRuntimeImages {
@@ -467,7 +563,14 @@ function Get-EnabledProviderRuntimePlans {
 
     $plans = @()
     $runtimeConfig = if ($null -ne $ServiceBaseConfig) { $ServiceBaseConfig.runtime } else { $null }
-    $providerPoolConfig = if ($null -ne $runtimeConfig) { $runtimeConfig.providerPool } else { $null }
+    $providerPoolConfig = $null
+    if ($null -ne $runtimeConfig) {
+        if ($runtimeConfig.PSObject.Properties.Match('providerPool').Count -gt 0) {
+            $providerPoolConfig = $runtimeConfig.providerPool
+        } elseif ($runtimeConfig.PSObject.Properties.Match('provider_pool').Count -gt 0) {
+            $providerPoolConfig = $runtimeConfig.provider_pool
+        }
+    }
     $poolProviders = if ($null -ne $providerPoolConfig) { $providerPoolConfig.providers } else { $null }
 
     foreach ($providerProperty in $ProvidersConfig.PSObject.Properties) {
@@ -673,6 +776,14 @@ if ([string]::IsNullOrWhiteSpace($resolvedMailboxServiceApiKey)) {
     $resolvedMailboxServiceApiKey = Read-EasyEmailServerApiKey -RepoRoot $repoRoot
 }
 
+$resolvedEasyProxyApiKey = [string]$EasyProxyApiKey
+if ([string]::IsNullOrWhiteSpace($resolvedEasyProxyApiKey)) {
+    $resolvedEasyProxyApiKey = [string]$env:EASY_PROXY_API_KEY
+}
+if ([string]::IsNullOrWhiteSpace($resolvedEasyProxyApiKey)) {
+    $resolvedEasyProxyApiKey = Read-EasyProxyManagementApiKey -RepoRoot $repoRoot
+}
+
 foreach ($path in @($registerOutputDirHost, $registerTeamAuthDirHost, $registerTeamLocalDirHost)) {
     if (-not [string]::IsNullOrWhiteSpace($path) -and -not (Test-Path -LiteralPath $path)) {
         New-Item -ItemType Directory -Force -Path $path | Out-Null
@@ -741,6 +852,13 @@ $gatewayConfigText = $gatewayConfigText -replace 'http://python-protocol-manager
 $gatewayConfigText = $gatewayConfigText -replace 'http://easy-protocol-python:9100', "http://$managerAlias`:9100"
 Set-Content -LiteralPath $gatewayConfigPath -Value $gatewayConfigText -Encoding UTF8
 Update-ManagedProviderRuntimeImages -ConfigPath $gatewayConfigPath -ProviderRuntimePlans $providerRuntimePlans
+Update-ManagedProviderRuntimePythonConfig `
+    -ConfigPath $gatewayConfigPath `
+    -RegisterOutputDirHost $registerOutputDirHost `
+    -RegisterTeamAuthDirHost $registerTeamAuthDirHost `
+    -RegisterTeamLocalDirHost $registerTeamLocalDirHost `
+    -MailboxServiceApiKey $resolvedMailboxServiceApiKey `
+    -EasyProxyApiKey $resolvedEasyProxyApiKey
 
 $renderedEnvPath = Join-Path $repoRoot 'deploy/stacks/easy-protocol/generated/stack.env'
 Copy-Item -LiteralPath $renderedEnvPath -Destination $envFile -Force
@@ -750,23 +868,21 @@ Set-EnvFileVariable -Path $envFile -Name 'REGISTER_TEAM_LOCAL_DIR_HOST' -Value $
 if (-not [string]::IsNullOrWhiteSpace($resolvedMailboxServiceApiKey)) {
     Set-EnvFileVariable -Path $envFile -Name 'MAILBOX_SERVICE_API_KEY' -Value $resolvedMailboxServiceApiKey
 }
+if (-not [string]::IsNullOrWhiteSpace($resolvedEasyProxyApiKey)) {
+    Set-EnvFileVariable -Path $envFile -Name 'EASY_PROXY_API_KEY' -Value $resolvedEasyProxyApiKey
+}
 
-$existingContainers = @(docker ps -a --format '{{.Names}}')
+$projectContainers = @(docker ps -a --filter 'label=com.docker.compose.project=easy-protocol' --format '{{.Names}}')
 if ($LASTEXITCODE -ne 0) {
-    throw "docker ps -a failed with exit code $LASTEXITCODE"
+    throw "docker ps -a failed while listing compose project containers with exit code $LASTEXITCODE"
 }
-foreach ($providerPlan in $providerRuntimePlans) {
-    if ($existingContainers -contains $providerPlan.containerName) {
-        docker rm -f $providerPlan.containerName | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to remove existing container: $($providerPlan.containerName)"
-        }
+foreach ($containerName in ($projectContainers | Sort-Object -Unique)) {
+    if ([string]::IsNullOrWhiteSpace($containerName)) {
+        continue
     }
-}
-if ($existingContainers -contains $gatewayContainerName) {
-    docker rm -f $gatewayContainerName | Out-Null
+    docker rm -f $containerName | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to remove existing container: $gatewayContainerName"
+        throw "Failed to remove existing project container: $containerName"
     }
 }
 

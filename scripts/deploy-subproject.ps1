@@ -35,7 +35,8 @@ param(
     [string]$RegisterOutputDirHost = '',
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
-    [string]$MailboxServiceApiKey = ''
+    [string]$MailboxServiceApiKey = '',
+    [string]$EasyProxyApiKey = ''
 )
 
 Set-StrictMode -Version Latest
@@ -61,6 +62,7 @@ function Invoke-CanonicalEasyProtocolComposeDeploy {
     if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
     if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
     if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
+    if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $args += @('-EasyProxyApiKey', $EasyProxyApiKey) }
 
     $useGhcrImages = $ForceGhcr -or `
         (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) -or `

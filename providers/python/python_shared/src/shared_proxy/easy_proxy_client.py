@@ -54,7 +54,14 @@ def _api_request(
 def _build_management_opener(base_url: str) -> urllib.request.OpenerDirector:
     parsed = urllib.parse.urlsplit(str(base_url or "").strip())
     host = str(parsed.hostname or "").strip()
-    should_bypass_proxy = host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "easy-proxy-service")
+    should_bypass_proxy = host in (
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "0.0.0.0",
+        "easy-proxy",
+        "easy-proxy-service",
+    )
     if not should_bypass_proxy and host:
         try:
             ip = ipaddress.ip_address(host)

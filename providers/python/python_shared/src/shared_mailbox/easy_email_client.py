@@ -92,7 +92,14 @@ def _build_opener() -> urllib.request.OpenerDirector:
     base_url = _mail_service_base_url()
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname or ""
-    should_bypass_proxy = host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "easy-email-service")
+    should_bypass_proxy = host in (
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "0.0.0.0",
+        "easy-email",
+        "easy-email-service",
+    )
     if not should_bypass_proxy and host:
         try:
             ip = ipaddress.ip_address(host)

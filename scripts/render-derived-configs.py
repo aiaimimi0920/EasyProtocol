@@ -223,6 +223,9 @@ def build_managed_provider_runtime(root_config: dict[str, Any]) -> dict[str, Any
         or stack.get("pythonPrimaryPublishedPort")
         or 11003
     )
+    external_dependencies = get_dict(stack, "externalDependencies")
+    easy_email = get_dict(external_dependencies, "easyEmail")
+    easy_proxy = get_dict(external_dependencies, "easyProxy")
 
     runtime: dict[str, Any] = {
         "enabled": True,
@@ -258,6 +261,23 @@ def build_managed_provider_runtime(root_config: dict[str, Any]) -> dict[str, Any
             },
             "host_mounts": _build_managed_provider_host_mounts(provider_key, provider),
         }
+        if provider_key == "python":
+            env_map = runtime["providers"][provider_key]["environment"]
+            env_map["MAILBOX_SERVICE_BASE_URL"] = str(
+                easy_email.get("baseUrl", env_map.get("MAILBOX_SERVICE_BASE_URL", "")) or ""
+            )
+            env_map["MAILBOX_SERVICE_API_KEY"] = str(
+                easy_email.get("apiKey", env_map.get("MAILBOX_SERVICE_API_KEY", "")) or ""
+            )
+            env_map["EASY_PROXY_BASE_URL"] = str(
+                easy_proxy.get("baseUrl", env_map.get("EASY_PROXY_BASE_URL", "")) or ""
+            )
+            env_map["EASY_PROXY_API_KEY"] = str(
+                easy_proxy.get("apiKey", env_map.get("EASY_PROXY_API_KEY", "")) or ""
+            )
+            env_map["M2U_EASY_PROXY_MAX_ATTEMPTS"] = str(
+                easy_email.get("m2uEasyProxyMaxAttempts", env_map.get("M2U_EASY_PROXY_MAX_ATTEMPTS", 10))
+            )
     return runtime
 
 
@@ -323,7 +343,9 @@ def build_easy_stack_env(root_config: dict[str, Any]) -> dict[str, str]:
         or stack.get("pythonPrimaryPublishedPort")
         or 11003
     )
+    env["MAILBOX_SERVICE_BASE_URL"] = str(easy_email.get("baseUrl", env.get("MAILBOX_SERVICE_BASE_URL", "")) or "")
     env["MAILBOX_SERVICE_API_KEY"] = str(easy_email.get("apiKey", env.get("MAILBOX_SERVICE_API_KEY", "")) or "")
+    env["EASY_PROXY_BASE_URL"] = str(easy_proxy.get("baseUrl", env.get("EASY_PROXY_BASE_URL", "")) or "")
     env["EASY_PROXY_API_KEY"] = str(easy_proxy.get("apiKey", env.get("EASY_PROXY_API_KEY", "")) or "")
     env["EASY_EMAIL_RESET_STORE_ON_BOOT"] = str(easy_email.get("resetStoreOnBoot", False)).lower()
     env["M2U_EASY_PROXY_MAX_ATTEMPTS"] = str(easy_email.get("m2uEasyProxyMaxAttempts", 10))
