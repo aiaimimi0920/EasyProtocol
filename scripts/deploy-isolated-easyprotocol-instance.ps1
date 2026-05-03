@@ -1,6 +1,7 @@
 param(
     [string]$InstanceName = 'dyn01',
     [string]$ConfigPath = 'config.yaml',
+    [switch]$SkipRender,
     [int]$GatewayHostPort = 29789,
     [int]$PythonManagerHostPort = 29103,
     [int]$PythonSlot = 1,
@@ -790,10 +791,12 @@ foreach ($path in @($registerOutputDirHost, $registerTeamAuthDirHost, $registerT
     }
 }
 
-Write-Host 'Rendering config for isolated instance...' -ForegroundColor Cyan
-& (Join-Path $PSScriptRoot 'render-derived-configs.ps1') -ConfigPath $resolvedConfigPath -ServiceBase -EasyProtocol
-if ($LASTEXITCODE -ne 0) {
-    throw "render-derived-configs.ps1 failed with exit code $LASTEXITCODE"
+if (-not $SkipRender) {
+    Write-Host 'Rendering config for isolated instance...' -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot 'render-derived-configs.ps1') -ConfigPath $resolvedConfigPath -ServiceBase -EasyProtocol
+    if ($LASTEXITCODE -ne 0) {
+        throw "render-derived-configs.ps1 failed with exit code $LASTEXITCODE"
+    }
 }
 
 if (-not $NoBuild -and -not $useGhcrImages) {

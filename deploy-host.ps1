@@ -14,6 +14,8 @@ param(
     )]
     [string]$Project = "easy-protocol",
     [string]$ConfigPath = "config.yaml",
+    [string]$ImportCode = "",
+    [string]$BootstrapFile = "",
     [switch]$NoBuild,
     [switch]$SkipRender,
     [switch]$Push,
@@ -212,6 +214,11 @@ $repoRoot = $repoInfo.RepoRoot
 $resolvedConfigPath = Resolve-AbsolutePath -Path $ConfigPath -BaseDir $launcherRoot
 $configExamplePath = Resolve-AbsolutePath -Path "config.example.yaml" -BaseDir $repoRoot
 $deployScript = Resolve-AbsolutePath -Path "scripts\deploy-subproject.ps1" -BaseDir $repoRoot
+$writeBootstrapScript = Resolve-AbsolutePath -Path "scripts\write-service-base-r2-bootstrap.ps1" -BaseDir $repoRoot
+$bootstrapRuntimeScript = Resolve-AbsolutePath -Path "deploy\service\base\bootstrap-service-config.py" -BaseDir $repoRoot
+$bootstrapHostPath = Resolve-AbsolutePath -Path "deploy\service\base\config\bootstrap\r2-bootstrap.json" -BaseDir $repoRoot
+$serviceBaseConfigPath = Resolve-AbsolutePath -Path "deploy\service\base\config\config.yaml" -BaseDir $repoRoot
+$serviceBaseRuntimeEnvPath = Resolve-AbsolutePath -Path "deploy\service\base\config\runtime.env" -BaseDir $repoRoot
 
 if ($Project -in @("isolated-instance", "build-provider-images", "publish-provider-images")) {
     $resolvedEasyBrowserRepoRoot = $env:EASYBROWSER_REPO_ROOT
@@ -236,6 +243,40 @@ if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
     Write-Host "[deploy-host] created config file from template: $resolvedConfigPath" -ForegroundColor Yellow
 }
 
+if (-not [string]::IsNullOrWhiteSpace($ImportCode) -and -not [string]::IsNullOrWhiteSpace($BootstrapFile)) {
+    throw 'Specify either ImportCode or BootstrapFile, not both.'
+}
+
+$shouldBootstrapFromImport = -not [string]::IsNullOrWhiteSpace($ImportCode) -or -not [string]::IsNullOrWhiteSpace($BootstrapFile)
+if ($shouldBootstrapFromImport -and $Project -notin @('service-base', 'service-base-ghcr', 'easy-protocol', 'isolated-instance', 'isolated-instance-ghcr')) {
+    throw "Project '$Project' does not support ImportCode/BootstrapFile bootstrap."
+}
+if ($shouldBootstrapFromImport) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bootstrapHostPath) | Out-Null
+    if (-not [string]::IsNullOrWhiteSpace($ImportCode)) {
+        & powershell -ExecutionPolicy Bypass -File $writeBootstrapScript `
+            -ImportCode $ImportCode `
+            -OutputPath $bootstrapHostPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to materialize bootstrap file from import code with exit code $LASTEXITCODE"
+        }
+    } else {
+        $resolvedBootstrapFile = Resolve-AbsolutePath -Path $BootstrapFile -BaseDir $launcherRoot
+        if (-not (Test-Path -LiteralPath $resolvedBootstrapFile)) {
+            throw "Bootstrap file not found: $resolvedBootstrapFile"
+        }
+        Copy-Item -LiteralPath $resolvedBootstrapFile -Destination $bootstrapHostPath -Force
+    }
+
+    & python $bootstrapRuntimeScript `
+        --bootstrap-path $bootstrapHostPath `
+        --config-path $serviceBaseConfigPath `
+        --runtime-env-path $serviceBaseRuntimeEnvPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to bootstrap EasyProtocol service/base config with exit code $LASTEXITCODE"
+    }
+}
+
 $args = @(
     "-ExecutionPolicy", "Bypass",
     "-File", $deployScript,
@@ -246,7 +287,7 @@ if (-not (Test-Path -LiteralPath $resolvedConfigPath)) {
     $args += "-InitConfig"
 }
 if ($NoBuild) { $args += "-NoBuild" }
-if ($SkipRender) { $args += "-SkipRender" }
+if ($SkipRender -or $shouldBootstrapFromImport) { $args += "-SkipRender" }
 if ($Push) { $args += "-Push" }
 if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) { $args += @("-ReleaseTag", $ReleaseTag) }
 if (-not [string]::IsNullOrWhiteSpace($Platform)) { $args += @("-Platform", $Platform) }

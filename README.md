@@ -194,6 +194,19 @@ That root entrypoint is intentionally single-file distributable. If an operator
 downloads only `deploy-host.ps1`, it can bootstrap a local repo cache
 automatically before invoking the canonical deployment path.
 
+The same root entrypoint now also supports owner-only runtime bootstrap
+through either:
+
+- `-ImportCode <decrypted-import-code>`
+- `-BootstrapFile <r2-bootstrap.json>`
+
+If you keep the owner private key as a stable passphrase string instead of a
+raw base64 private key, derive the matching public key with:
+
+```powershell
+python .\scripts\easyprotocol-import-code.py derive-public-key --private-key-file .\owner-private-key.txt
+```
+
 Lower-level GHCR rollout command:
 
 ```powershell

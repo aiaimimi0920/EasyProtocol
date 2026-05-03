@@ -48,7 +48,8 @@ function Invoke-CanonicalEasyProtocolComposeDeploy {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ResolvedConfigPath,
-        [switch]$ForceGhcr
+        [switch]$ForceGhcr,
+        [switch]$SkipRender
     )
 
     $args = @(
@@ -58,6 +59,7 @@ function Invoke-CanonicalEasyProtocolComposeDeploy {
         '-PythonManagerHostPort', [string]$PythonManagerHostPort,
         '-PythonSlot', [string]$PythonSlot
     )
+    if ($SkipRender) { $args += '-SkipRender' }
     if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
     if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
     if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
@@ -129,7 +131,7 @@ switch ($Project) {
         break
     }
     'easy-protocol' {
-        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath -SkipRender:$SkipRender
         break
     }
     'release-service-base' {
@@ -175,11 +177,11 @@ switch ($Project) {
         break
     }
     'isolated-instance' {
-        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath -SkipRender:$SkipRender
         break
     }
     'isolated-instance-ghcr' {
-        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath -ForceGhcr
+        Invoke-CanonicalEasyProtocolComposeDeploy -ResolvedConfigPath $resolvedConfigPath -ForceGhcr -SkipRender:$SkipRender
         break
     }
 }
