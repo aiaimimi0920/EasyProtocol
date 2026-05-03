@@ -43,6 +43,9 @@ provider_pool = (((data.get("serviceBase") or {}).get("runtime") or {}).get("pro
 for family in provider_pool.values():
     if isinstance(family, dict) and "warm_replicas" in family:
         family["warm_replicas"] = 0
+managed_runtime = (((data.get("serviceBase") or {}).get("runtime") or {}).get("managed_provider_runtime") or {})
+if isinstance(managed_runtime, dict):
+    managed_runtime["enabled"] = False
 path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 '@.Replace('__SMOKE_CONFIG_PATH__', $smokeConfigPath.Replace('\', '\\')) | python -
 
