@@ -35,6 +35,11 @@ if __package__ in (None, ""):
     from others.storage import load_json_payload
     from protocol_chatgpt_login import run_protocol_chatgpt_login_init_from_path
     from protocol_oauth import run_protocol_oauth_from_path
+    from protocol_phone_verification import (
+        build_phone_verification_required_payload,
+        submit_phone_verification_code_from_path,
+        submit_phone_verification_number_from_path,
+    )
     from protocol_platform_org import run_protocol_platform_organization_init_from_path
     from protocol_small_success import run_protocol_small_success_once
 else:
@@ -56,6 +61,11 @@ else:
     from .others.storage import load_json_payload
     from .protocol_chatgpt_login import run_protocol_chatgpt_login_init_from_path
     from .protocol_oauth import run_protocol_oauth_from_path
+    from .protocol_phone_verification import (
+        build_phone_verification_required_payload,
+        submit_phone_verification_code_from_path,
+        submit_phone_verification_number_from_path,
+    )
     from .protocol_platform_org import run_protocol_platform_organization_init_from_path
     from .protocol_small_success import run_protocol_small_success_once
 
@@ -466,6 +476,14 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
             explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
             workspace_selector=str(step_input.get("workspace_selector") or "").strip() or None,
         )
+        if bool(getattr(oauth_result, "phone_verification_required", False)):
+            return build_phone_verification_required_payload(
+                source_path=str(source_path),
+                storage_path=str(getattr(oauth_result, "storage_path", "") or "").strip(),
+                page_type=str(getattr(oauth_result, "page_type", "") or "").strip() or "add_phone",
+                final_url=str(getattr(oauth_result, "final_url", "") or "").strip(),
+                resume_context=dict(getattr(oauth_result, "resume_context", {}) or {}),
+            )
         result = _build_oauth_result_payload(
             oauth_result.auth,
             email=oauth_result.email,
@@ -489,6 +507,22 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
             },
         )
         return result
+
+    if normalized_step_type == "submit_phone_verification_number":
+        return submit_phone_verification_number_from_path(
+            source_path=str(step_input.get("source_path") or "").strip(),
+            resume_context=dict(step_input.get("resume_context") or {}),
+            phone_number=str(step_input.get("phone_number") or "").strip(),
+            explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
+        )
+
+    if normalized_step_type == "submit_phone_verification_code":
+        return submit_phone_verification_code_from_path(
+            source_path=str(step_input.get("source_path") or "").strip(),
+            resume_context=dict(step_input.get("resume_context") or {}),
+            sms_code=str(step_input.get("sms_code") or "").strip(),
+            explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
+        )
 
     if normalized_step_type == "obtain_team_mother_oauth":
         source_path = Path(str(step_input.get("source_path") or "").strip()).resolve()

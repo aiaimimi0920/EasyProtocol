@@ -32,6 +32,7 @@ def persist_first_phone_record(
     birthdate: str,
     page_type: str,
     final_url: str,
+    extra_payload: dict[str, Any] | None = None,
 ) -> str:
     target_dir = resolve_first_phone_dir(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -54,6 +55,8 @@ def persist_first_phone_record(
         "finalUrl": str(final_url or ""),
         "createdAt": _utc_now_text(),
     }
+    if isinstance(extra_payload, dict) and extra_payload:
+        payload.update(extra_payload)
     file_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return str(file_path)
 

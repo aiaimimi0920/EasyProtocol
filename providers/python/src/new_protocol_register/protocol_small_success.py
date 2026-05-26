@@ -29,7 +29,7 @@ if __package__ in (None, ""):
     from others.models import PLATFORM_LOGIN_URL, PlatformProtocolRegistrationResult
     from others.paths import DEFAULT_REGISTER_PROTOCOL_OUTPUT_DIR
     from others.runtime import flow_network_env, lease_flow_proxy, resolve_mailbox, seed_device_cookie
-    from others.storage import load_json_payload, persist_small_success_record
+    from others.storage import load_json_payload, persist_first_phone_record, persist_small_success_record
 else:
     from .others.bootstrap import ensure_local_bundle_imports
 
@@ -37,7 +37,7 @@ else:
     from .others.models import PLATFORM_LOGIN_URL, PlatformProtocolRegistrationResult
     from .others.paths import DEFAULT_REGISTER_PROTOCOL_OUTPUT_DIR
     from .others.runtime import flow_network_env, lease_flow_proxy, resolve_mailbox, seed_device_cookie
-    from .others.storage import load_json_payload, persist_small_success_record
+    from .others.storage import load_json_payload, persist_first_phone_record, persist_small_success_record
 
 from curl_cffi import requests
 
@@ -900,6 +900,42 @@ def _build_protocol_small_success_result(
     )
 
 
+def _persist_phone_wall_resume_record(
+    *,
+    output_dir: str | None,
+    mailbox: Any,
+    password: str,
+    first_name: str,
+    last_name: str,
+    birthdate: str,
+    page_type: str,
+    final_url: str,
+    result_storage_path: str,
+) -> str:
+    return persist_first_phone_record(
+        output_dir=output_dir,
+        outcome="phone_wall",
+        email=mailbox.email,
+        password=password,
+        mailbox_provider=mailbox.provider,
+        mailbox_access_key=mailbox.ref,
+        mailbox_ref=mailbox.ref,
+        mailbox_session_id=mailbox.session_id,
+        first_name=first_name,
+        last_name=last_name,
+        birthdate=birthdate,
+        page_type=page_type,
+        final_url=final_url,
+        extra_payload={
+            "resumeContext": {
+                "flow": "oauth",
+                "storagePath": str(result_storage_path or "").strip(),
+                "pageType": str(page_type or "").strip(),
+            }
+        },
+    )
+
+
 def _update_openai_login_init_state(
     *,
     source_path: Path,
@@ -1521,7 +1557,7 @@ def run_protocol_small_success_once(
                                     response=signup_response,
                                     fallback_page_type=signup_page_type,
                                 )
-                                return _build_protocol_small_success_result(
+                                result = _build_protocol_small_success_result(
                                     output_dir=output_root,
                                     mailbox=mailbox,
                                     password=password,
@@ -1532,6 +1568,18 @@ def run_protocol_small_success_once(
                                     final_url=final_url,
                                     platform_auth_context=platform_auth_context,
                                 )
+                                _persist_phone_wall_resume_record(
+                                    output_dir=output_root,
+                                    mailbox=mailbox,
+                                    password=password,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    birthdate=birthdate,
+                                    page_type=surface,
+                                    final_url=final_url,
+                                    result_storage_path=result.storage_path,
+                                )
+                                return result
                             _raise_if_unexpected_http(
                                 signup_response,
                                 expected_statuses={200},
@@ -1581,6 +1629,17 @@ def run_protocol_small_success_once(
                                     page_type=surface,
                                     final_url=final_url,
                                     platform_auth_context=platform_auth_context,
+                                )
+                                _persist_phone_wall_resume_record(
+                                    output_dir=output_root,
+                                    mailbox=mailbox,
+                                    password=password,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    birthdate=birthdate,
+                                    page_type=surface,
+                                    final_url=final_url,
+                                    result_storage_path=result.storage_path,
                                 )
                                 _persist_protocol_attempt_diagnostics(
                                     result.storage_path,
@@ -1653,6 +1712,17 @@ def run_protocol_small_success_once(
                                     page_type=surface,
                                     final_url=final_url,
                                     platform_auth_context=platform_auth_context,
+                                )
+                                _persist_phone_wall_resume_record(
+                                    output_dir=output_root,
+                                    mailbox=mailbox,
+                                    password=password,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    birthdate=birthdate,
+                                    page_type=surface,
+                                    final_url=final_url,
+                                    result_storage_path=result.storage_path,
                                 )
                                 _persist_protocol_attempt_diagnostics(
                                     result.storage_path,

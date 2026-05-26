@@ -231,6 +231,51 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("email", result["authMode"])
         self.assertFalse(bool(result.get("refreshOnly")))
 
+    def test_obtain_codex_oauth_phone_wall_result_contains_resume_context(self) -> None:
+        with mock.patch.object(
+            easyprotocol_flow,
+            "run_protocol_oauth_from_path",
+            return_value=SimpleNamespace(
+                phone_verification_required=True,
+                page_type="add_phone",
+                final_url="https://chatgpt.com/auth/add-phone",
+                resume_context={"flow": "oauth", "token": "resume_123"},
+                storage_path="C:/tmp/first-phone.json",
+            ),
+        ):
+            result = easyprotocol_flow.dispatch_easyprotocol_step(
+                step_type="obtain_codex_oauth",
+                step_input={"source_path": "C:/tmp/small.json", "output_dir": "C:/tmp/out"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["phoneVerificationRequired"])
+        self.assertEqual("add_phone", result["pageType"])
+        self.assertEqual("resume_123", result["resumeContext"]["token"])
+
+    def test_dispatch_submit_phone_verification_code_returns_oauth_payload(self) -> None:
+        with mock.patch.object(
+            easyprotocol_flow,
+            "submit_phone_verification_code_from_path",
+            return_value={
+                "ok": True,
+                "status": "completed",
+                "successPath": "C:/tmp/codex-free.json",
+                "userId": "user_123",
+            },
+        ):
+            result = easyprotocol_flow.dispatch_easyprotocol_step(
+                step_type="submit_phone_verification_code",
+                step_input={
+                    "source_path": "C:/tmp/small.json",
+                    "resume_context": {"token": "resume_123"},
+                    "sms_code": "123456",
+                },
+            )
+
+        self.assertEqual("completed", result["status"])
+        self.assertEqual("user_123", result["userId"])
+
     def test_requested_email_candidates_prefer_cloudflare_for_mail_aiaimimi(self) -> None:
         with mock.patch.object(
             protocol_runtime,

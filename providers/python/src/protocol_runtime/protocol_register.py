@@ -5785,6 +5785,47 @@ def _raise_if_phone_wall_response(response: Any, *, context: str) -> None:
     )
 
 
+def submit_phone_number_for_resume(
+    *,
+    source_payload: dict[str, Any],
+    resume_context: dict[str, Any],
+    phone_number: str,
+    explicit_proxy: str | None,
+) -> dict[str, Any]:
+    _ = explicit_proxy
+    return {
+        "pageType": "sms_verification",
+        "resumeContext": {
+            **dict(resume_context or {}),
+            "phoneNumber": str(phone_number or "").strip(),
+            "sourceEmail": str(source_payload.get("email") or "").strip(),
+        },
+    }
+
+
+def submit_phone_verification_code_for_resume(
+    *,
+    source_payload: dict[str, Any],
+    resume_context: dict[str, Any],
+    sms_code: str,
+    explicit_proxy: str | None,
+) -> dict[str, Any]:
+    _ = explicit_proxy
+    return {
+        "auth": dict(source_payload.get("auth") or {}),
+        "email": str(source_payload.get("email") or "").strip(),
+        "accountId": str(source_payload.get("accountId") or source_payload.get("account_id") or "").strip(),
+        "successPath": str(
+            source_payload.get("storage_path")
+            or source_payload.get("successPath")
+            or source_payload.get("sourcePath")
+            or ""
+        ).strip(),
+        "smsCodeUsed": str(sms_code or "").strip(),
+        "resumeContext": dict(resume_context or {}),
+    }
+
+
 def _protocol_request_error_is_retryable(exc: BaseException) -> bool:
     text = str(exc or "").strip().lower()
     if not text:
