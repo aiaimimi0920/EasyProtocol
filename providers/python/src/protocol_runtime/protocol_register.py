@@ -3854,6 +3854,138 @@ def _browser_try_submit_password_with_selenium(driver: Any, *, password: str) ->
         from selenium.webdriver.common.keys import Keys
     except Exception:
         return False
+
+
+def _browser_try_submit_phone_number(driver: Any, *, phone_number: str) -> bool:
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+    except Exception:
+        return False
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    selectors = [
+        'input[type="tel"]',
+        'input[inputmode="tel"]',
+        'input[autocomplete="tel"]',
+        'input[name*="phone"]',
+        'input[id*="phone"]',
+    ]
+    phone_input = None
+    for selector in selectors:
+        try:
+            phone_input = driver.find_element(By.CSS_SELECTOR, selector)
+            if phone_input is not None:
+                break
+        except Exception:
+            continue
+    if phone_input is None:
+        return False
+    submit_button = None
+    labels = {"continue", "next", "send code", "verify", "submit", "继续", "下一步", "发送验证码", "验证"}
+    try:
+        for candidate in driver.find_elements(By.TAG_NAME, "button"):
+            text = str(getattr(candidate, "text", "") or "").strip().lower()
+            if text in labels:
+                submit_button = candidate
+                break
+    except Exception:
+        submit_button = None
+    if submit_button is None:
+        return False
+    try:
+        phone_input.click()
+    except Exception:
+        pass
+    try:
+        phone_input.send_keys(Keys.CONTROL, "a")
+    except Exception:
+        pass
+    phone_input.send_keys(str(phone_number or ""))
+    time.sleep(0.5)
+    try:
+        submit_button.click()
+        return True
+    except Exception:
+        return False
+
+
+def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+    except Exception:
+        return False
+    code = str(sms_code or "").strip()
+    if not code:
+        return False
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+    try:
+        single_inputs = driver.find_elements(
+            By.CSS_SELECTOR,
+            'input[maxlength="1"], input[inputmode="numeric"], input[autocomplete="one-time-code"]',
+        )
+    except Exception:
+        single_inputs = []
+    usable_single_inputs = [item for item in single_inputs if item is not None][: len(code)]
+    if len(usable_single_inputs) >= len(code) and len(code) > 1:
+        for index, digit in enumerate(code):
+            try:
+                target = usable_single_inputs[index]
+                target.click()
+                target.send_keys(Keys.CONTROL, "a")
+                target.send_keys(digit)
+            except Exception:
+                return False
+    else:
+        text_input = None
+        selectors = [
+            'input[name*="code"]',
+            'input[id*="code"]',
+            'input[autocomplete="one-time-code"]',
+            'input[inputmode="numeric"]',
+            'input[type="text"]',
+        ]
+        for selector in selectors:
+            try:
+                text_input = driver.find_element(By.CSS_SELECTOR, selector)
+                if text_input is not None:
+                    break
+            except Exception:
+                continue
+        if text_input is None:
+            return False
+        try:
+            text_input.click()
+        except Exception:
+            pass
+        try:
+            text_input.send_keys(Keys.CONTROL, "a")
+        except Exception:
+            pass
+        text_input.send_keys(code)
+    submit_button = None
+    labels = {"continue", "verify", "submit", "next", "继续", "验证", "提交", "下一步"}
+    try:
+        for candidate in driver.find_elements(By.TAG_NAME, "button"):
+            text = str(getattr(candidate, "text", "") or "").strip().lower()
+            if text in labels:
+                submit_button = candidate
+                break
+    except Exception:
+        submit_button = None
+    if submit_button is None:
+        return True
+    try:
+        submit_button.click()
+        return True
+    except Exception:
+        return False
     try:
         driver.switch_to.default_content()
     except Exception:
@@ -5169,6 +5301,75 @@ def _iter_session_cookie_objects(session: requests.Session) -> list[Any]:
     return items
 
 
+def _export_protocol_session_cookies(session: requests.Session) -> list[dict[str, Any]]:
+    exported: list[dict[str, Any]] = []
+    for cookie in _iter_session_cookie_objects(session):
+        name = str(getattr(cookie, "name", "") or "").strip()
+        value = str(getattr(cookie, "value", "") or "")
+        domain = str(getattr(cookie, "domain", "") or "").strip()
+        path = str(getattr(cookie, "path", "") or "/").strip() or "/"
+        if not name or not value or not domain:
+            continue
+        payload: dict[str, Any] = {
+            "name": name,
+            "value": value,
+            "domain": domain,
+            "path": path,
+            "secure": bool(getattr(cookie, "secure", False)),
+        }
+        try:
+            expiry = getattr(cookie, "expires", None)
+            if expiry:
+                payload["expiry"] = int(expiry)
+        except Exception:
+            pass
+        exported.append(payload)
+    return exported
+
+
+def _restore_protocol_session_from_resume_context(resume_context: dict[str, Any]) -> requests.Session:
+    impersonate = (os.environ.get("PROTOCOL_HTTP_IMPERSONATE") or "").strip() or _DEFAULT_IMPERSONATE
+    verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
+    session = requests.Session(
+        impersonate=impersonate,
+        timeout=30,
+        verify=verify_tls,
+    )
+    browser_context = resume_context.get("browser") if isinstance(resume_context.get("browser"), dict) else {}
+    user_agent = str(browser_context.get("userAgent") or DEFAULT_PROTOCOL_USER_AGENT).strip() or DEFAULT_PROTOCOL_USER_AGENT
+    session.headers.update({"user-agent": user_agent})
+    for cookie in resume_context.get("sessionCookies") or []:
+        if not isinstance(cookie, dict):
+            continue
+        name = str(cookie.get("name") or "").strip()
+        value = str(cookie.get("value") or "")
+        domain = str(cookie.get("domain") or "").strip()
+        path = str(cookie.get("path") or "/").strip() or "/"
+        if not name or not domain:
+            continue
+        try:
+            session.cookies.set(
+                name,
+                value,
+                domain=domain,
+                path=path,
+                secure=bool(cookie.get("secure", False)),
+            )
+        except Exception:
+            continue
+    return session
+
+
+def _oauth_start_from_resume_context(resume_context: dict[str, Any]) -> OAuthStart:
+    oauth_payload = resume_context.get("oauth") if isinstance(resume_context.get("oauth"), dict) else {}
+    return OAuthStart(
+        auth_url=str(oauth_payload.get("authUrl") or oauth_payload.get("auth_url") or "").strip(),
+        state=str(oauth_payload.get("state") or "").strip(),
+        code_verifier=str(oauth_payload.get("codeVerifier") or oauth_payload.get("code_verifier") or "").strip(),
+        redirect_uri=str(oauth_payload.get("redirectUri") or oauth_payload.get("redirect_uri") or "").strip(),
+    )
+
+
 def _cookie_matches_request_url(cookie: Any, request_url: str) -> bool:
     normalized_url = str(request_url or "").strip()
     if not normalized_url:
@@ -5796,15 +5997,48 @@ def submit_phone_number_for_resume(
     phone_number: str,
     explicit_proxy: str | None,
 ) -> dict[str, Any]:
-    _ = explicit_proxy
-    return {
-        "pageType": "sms_verification",
-        "resumeContext": {
-            **dict(resume_context or {}),
-            "phoneNumber": str(phone_number or "").strip(),
-            "sourceEmail": str(source_payload.get("email") or "").strip(),
-        },
-    }
+    continue_url = str(resume_context.get("continueUrl") or "").strip()
+    if not continue_url:
+        raise RuntimeError("phone_resume_missing_continue_url")
+    session = _restore_protocol_session_from_resume_context(resume_context)
+    new_driver = _load_protocol_browser_new_driver()
+    driver = None
+    proxy_dir = None
+    try:
+        driver, proxy_dir = new_driver(
+            explicit_proxy,
+            browser_backend=_protocol_browser_native_backend(),
+        )
+        _hydrate_browser_driver_with_protocol_session_cookies(driver, session=session)
+        driver.get(continue_url)
+        if not _browser_try_submit_phone_number(driver, phone_number=str(phone_number or "").strip()):
+            raise RuntimeError("phone_number_submit_failed")
+        time.sleep(1.5)
+        _import_browser_driver_cookies_into_session(session, driver=driver)
+        updated_url = str(getattr(driver, "current_url", "") or "").strip() or continue_url
+        return {
+            "pageType": "sms_verification",
+            "resumeContext": {
+                **dict(resume_context or {}),
+                "continueUrl": updated_url,
+                "currentUrl": updated_url,
+                "pageType": "sms_verification",
+                "phoneNumber": str(phone_number or "").strip(),
+                "sourceEmail": str(source_payload.get("email") or "").strip(),
+                "sessionCookies": _export_protocol_session_cookies(session),
+            },
+        }
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        if proxy_dir:
+            try:
+                shutil.rmtree(str(proxy_dir), ignore_errors=True)
+            except Exception:
+                pass
 
 
 def submit_phone_verification_code_for_resume(
@@ -5814,20 +6048,112 @@ def submit_phone_verification_code_for_resume(
     sms_code: str,
     explicit_proxy: str | None,
 ) -> dict[str, Any]:
-    _ = explicit_proxy
-    return {
-        "auth": dict(source_payload.get("auth") or {}),
-        "email": str(source_payload.get("email") or "").strip(),
-        "accountId": str(source_payload.get("accountId") or source_payload.get("account_id") or "").strip(),
-        "successPath": str(
-            source_payload.get("storage_path")
-            or source_payload.get("successPath")
-            or source_payload.get("sourcePath")
-            or ""
-        ).strip(),
-        "smsCodeUsed": str(sms_code or "").strip(),
-        "resumeContext": dict(resume_context or {}),
-    }
+    continue_url = str(
+        resume_context.get("currentUrl")
+        or resume_context.get("continueUrl")
+        or ""
+    ).strip()
+    if not continue_url:
+        raise RuntimeError("phone_resume_missing_continue_url")
+    session = _restore_protocol_session_from_resume_context(resume_context)
+    oauth = _oauth_start_from_resume_context(resume_context)
+    if not oauth.auth_url or not oauth.state or not oauth.redirect_uri:
+        raise RuntimeError("phone_resume_missing_oauth_context")
+    new_driver = _load_protocol_browser_new_driver()
+    driver = None
+    proxy_dir = None
+    try:
+        driver, proxy_dir = new_driver(
+            explicit_proxy,
+            browser_backend=_protocol_browser_native_backend(),
+        )
+        _hydrate_browser_driver_with_protocol_session_cookies(driver, session=session)
+        driver.get(continue_url)
+        if not _browser_try_submit_phone_code(driver, sms_code=str(sms_code or "").strip()):
+            raise RuntimeError("phone_code_submit_failed")
+        time.sleep(2.0)
+        _import_browser_driver_cookies_into_session(session, driver=driver)
+        current_url = str(getattr(driver, "current_url", "") or "").strip()
+        if current_url and _is_callback_url(current_url):
+            callback_result = _callback_result_from_url(
+                callback_url=current_url,
+                oauth=oauth,
+                explicit_proxy=explicit_proxy,
+                default_email=str(source_payload.get("email") or "").strip(),
+                mailbox_ref=str(
+                    source_payload.get("mailboxRef")
+                    or source_payload.get("mailbox_ref")
+                    or source_payload.get("mailboxAccessKey")
+                    or ""
+                ).strip(),
+                password=str(source_payload.get("password") or "").strip(),
+                first_name=str(source_payload.get("firstName") or source_payload.get("first_name") or "").strip(),
+                last_name=str(source_payload.get("lastName") or source_payload.get("last_name") or "").strip(),
+                birthdate=str(source_payload.get("birthdate") or "").strip(),
+            )
+            return {
+                "auth": dict(callback_result.auth or {}),
+                "email": str(callback_result.email or "").strip(),
+                "accountId": str(
+                    dict(callback_result.auth or {}).get("account_id")
+                    or dict((dict(callback_result.auth or {}).get("https://api.openai.com/auth") or {})).get("account_id")
+                    or ""
+                ).strip(),
+                "successPath": str(
+                    source_payload.get("storage_path")
+                    or source_payload.get("successPath")
+                    or source_payload.get("sourcePath")
+                    or ""
+                ).strip(),
+                "smsCodeUsed": str(sms_code or "").strip(),
+                "resumeContext": dict(resume_context or {}),
+            }
+        completed = _continue_authenticated_codex_oauth(
+            session=session,
+            oauth=oauth,
+            explicit_proxy=explicit_proxy,
+            default_email=str(source_payload.get("email") or "").strip(),
+            mailbox_ref=str(
+                source_payload.get("mailboxRef")
+                or source_payload.get("mailbox_ref")
+                or source_payload.get("mailboxAccessKey")
+                or ""
+            ).strip(),
+            password=str(source_payload.get("password") or "").strip(),
+            first_name=str(source_payload.get("firstName") or source_payload.get("first_name") or "").strip(),
+            last_name=str(source_payload.get("lastName") or source_payload.get("last_name") or "").strip(),
+            birthdate=str(source_payload.get("birthdate") or "").strip(),
+            request_label="resume-phone-verification",
+        )
+        auth_payload = dict(completed.auth or {})
+        return {
+            "auth": auth_payload,
+            "email": str(completed.email or "").strip(),
+            "accountId": str(
+                auth_payload.get("account_id")
+                or dict((auth_payload.get("https://api.openai.com/auth") or {})).get("account_id")
+                or ""
+            ).strip(),
+            "successPath": str(
+                source_payload.get("storage_path")
+                or source_payload.get("successPath")
+                or source_payload.get("sourcePath")
+                or ""
+            ).strip(),
+            "smsCodeUsed": str(sms_code or "").strip(),
+            "resumeContext": dict(resume_context or {}),
+        }
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        if proxy_dir:
+            try:
+                shutil.rmtree(str(proxy_dir), ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _build_phone_verification_required_result(
@@ -5836,6 +6162,10 @@ def _build_phone_verification_required_result(
     auth_obj: dict[str, Any],
     response: Any,
     context: str,
+    session: requests.Session,
+    oauth: OAuthStart,
+    user_agent: str,
+    device_id: str,
 ) -> ProtocolRegistrationResult:
     page_type = _extract_page_type(response) or "add_phone"
     continue_url = _response_continue_url(response)
@@ -5852,6 +6182,17 @@ def _build_phone_verification_required_result(
             "continueUrl": continue_url,
             "method": "GET",
             "pageType": page_type,
+            "sessionCookies": _export_protocol_session_cookies(session),
+            "oauth": {
+                "authUrl": str(oauth.auth_url or "").strip(),
+                "state": str(oauth.state or "").strip(),
+                "codeVerifier": str(oauth.code_verifier or "").strip(),
+                "redirectUri": str(oauth.redirect_uri or "").strip(),
+            },
+            "browser": {
+                "userAgent": str(user_agent or "").strip(),
+                "deviceId": str(device_id or "").strip(),
+            },
         },
     )
 
@@ -9347,6 +9688,10 @@ def run_protocol_repair_once(
                     auth_obj=auth_obj,
                     response=otp_validate_response,
                     context="repair_otp_validate",
+                    session=session,
+                    oauth=oauth,
+                    user_agent=sentinel_context.user_agent,
+                    device_id=sentinel_context.device_id,
                 )
             oauth_entry_response = otp_validate_response
             oauth_entry_referer = EMAIL_VERIFICATION_REFERER

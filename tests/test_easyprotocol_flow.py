@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -275,6 +276,123 @@ class EasyProtocolFlowTests(unittest.TestCase):
 
         self.assertEqual("completed", result["status"])
         self.assertEqual("user_123", result["userId"])
+
+    def test_submit_phone_number_for_resume_updates_resume_context_after_browser_step(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "https://auth.openai.com/add-phone"
+
+            def get(self, url: str) -> None:
+                self.current_url = "https://auth.openai.com/sms-verification"
+
+            def quit(self) -> None:
+                return None
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (_FakeDriver(), None),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_number",
+            return_value=True,
+        ), mock.patch.object(
+            protocol_register,
+            "_export_protocol_session_cookies",
+            return_value=[{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+        ), mock.patch.object(
+            protocol_register,
+            "_extract_page_type",
+            return_value="sms_verification",
+        ):
+            result = protocol_register.submit_phone_number_for_resume(
+                source_payload={"email": "user@example.com"},
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/add-phone",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/api/accounts/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "https://chatgpt.com/api/auth/callback/openai",
+                    },
+                },
+                phone_number="+15551234567",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual("sms_verification", result["pageType"])
+        self.assertEqual("https://auth.openai.com/sms-verification", result["resumeContext"]["continueUrl"])
+        self.assertEqual(1, len(result["resumeContext"]["sessionCookies"]))
+
+    def test_submit_phone_verification_code_for_resume_can_finish_callback_url(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+
+            def get(self, url: str) -> None:
+                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+
+            def quit(self) -> None:
+                return None
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (_FakeDriver(), None),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_code",
+            return_value=True,
+        ), mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=protocol_register.ProtocolRegistrationResult(
+                email="user@example.com",
+                auth={"user_id": "user_123"},
+            ),
+        ):
+            result = protocol_register.submit_phone_verification_code_for_resume(
+                source_payload={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailboxRef": "mailtm:test",
+                    "firstName": "User",
+                    "lastName": "Example",
+                    "birthdate": "2000-01-01",
+                },
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/sms-verification",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/api/accounts/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "https://chatgpt.com/api/auth/callback/openai",
+                    },
+                },
+                sms_code="123456",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual("user@example.com", result["email"])
+        self.assertEqual("user_123", result["auth"]["user_id"])
 
     def test_requested_email_candidates_prefer_cloudflare_for_mail_aiaimimi(self) -> None:
         with mock.patch.object(
