@@ -193,6 +193,10 @@ _WORKSPACE_ID_RE = re.compile(r'"id"\s*:\s*"([^"]+)"', re.IGNORECASE)
 class ProtocolRegistrationResult:
     email: str
     auth: dict[str, Any]
+    phone_verification_required: bool = False
+    page_type: str = ""
+    final_url: str = ""
+    resume_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -5826,6 +5830,32 @@ def submit_phone_verification_code_for_resume(
     }
 
 
+def _build_phone_verification_required_result(
+    *,
+    email: str,
+    auth_obj: dict[str, Any],
+    response: Any,
+    context: str,
+) -> ProtocolRegistrationResult:
+    page_type = _extract_page_type(response) or "add_phone"
+    continue_url = _response_continue_url(response)
+    final_url = continue_url or _response_url(response)
+    return ProtocolRegistrationResult(
+        email=str(email or "").strip(),
+        auth=dict(auth_obj or {}),
+        phone_verification_required=True,
+        page_type=page_type,
+        final_url=final_url,
+        resume_context={
+            "flow": "oauth",
+            "context": str(context or "").strip(),
+            "continueUrl": continue_url,
+            "method": "GET",
+            "pageType": page_type,
+        },
+    )
+
+
 def _protocol_request_error_is_retryable(exc: BaseException) -> bool:
     text = str(exc or "").strip().lower()
     if not text:
@@ -9312,12 +9342,12 @@ def run_protocol_repair_once(
             try:
                 _raise_if_phone_wall_response(otp_validate_response, context="repair_otp_validate")
             except Exception as exc:
-                raise _wrap_protocol_error(
-                    exc,
-                    stage="stage_otp_validate",
-                    detail="repair_email_otp_validate_phone_wall",
-                    category="blocked",
-                ) from exc
+                return _build_phone_verification_required_result(
+                    email=email,
+                    auth_obj=auth_obj,
+                    response=otp_validate_response,
+                    context="repair_otp_validate",
+                )
             oauth_entry_response = otp_validate_response
             oauth_entry_referer = EMAIL_VERIFICATION_REFERER
         elif page_type == "sign_in_with_chatgpt_codex_consent":

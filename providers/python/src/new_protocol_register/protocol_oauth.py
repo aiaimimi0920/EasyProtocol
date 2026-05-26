@@ -23,14 +23,14 @@ if __package__ in (None, ""):
     ensure_local_bundle_imports()
     from others.models import PLATFORM_LOGIN_URL, ProtocolOAuthResult
     from others.runtime import flow_network_env, lease_flow_proxy, resolve_mailbox
-    from others.storage import load_json_payload, persist_success_auth_json
+    from others.storage import load_json_payload, persist_first_phone_record, persist_success_auth_json
 else:
     from .others.bootstrap import ensure_local_bundle_imports
 
     ensure_local_bundle_imports()
     from .others.models import PLATFORM_LOGIN_URL, ProtocolOAuthResult
     from .others.runtime import flow_network_env, lease_flow_proxy, resolve_mailbox
-    from .others.storage import load_json_payload, persist_success_auth_json
+    from .others.storage import load_json_payload, persist_first_phone_record, persist_success_auth_json
 
 from protocol_runtime.protocol_register import run_protocol_repair_once, temporary_workspace_selector_overrides
 from shared_mailbox.easy_email_client import release_mailbox, release_mailbox_sessions_by_email
@@ -305,6 +305,34 @@ def run_protocol_oauth_once(
             reason="protocol_oauth_failure_cleanup_by_email",
         )
         raise
+
+    if bool(getattr(protocol_result, "phone_verification_required", False)):
+        storage_path = persist_first_phone_record(
+            output_dir=output_dir,
+            outcome="phone_wall",
+            email=str(auth_obj.get("email") or "").strip(),
+            password=str(auth_obj.get("password") or "").strip(),
+            mailbox_provider=str(result_auth.get("mailboxProvider") or auth_obj.get("mailbox_provider") or "").strip(),
+            mailbox_access_key=str(result_auth.get("mailboxAccessKey") or auth_obj.get("mailbox_ref") or "").strip(),
+            mailbox_ref=str(result_auth.get("mailboxRef") or auth_obj.get("mailbox_ref") or "").strip(),
+            mailbox_session_id=str(result_auth.get("mailboxSessionId") or auth_obj.get("session_id") or "").strip(),
+            first_name=str(auth_obj.get("first_name") or "").strip(),
+            last_name=str(auth_obj.get("last_name") or "").strip(),
+            birthdate=str(auth_obj.get("birthdate") or "").strip(),
+            page_type=str(getattr(protocol_result, "page_type", "") or "add_phone").strip(),
+            final_url=str(getattr(protocol_result, "final_url", "") or "").strip(),
+            extra_payload={"resumeContext": dict(getattr(protocol_result, "resume_context", {}) or {})},
+        )
+        return ProtocolOAuthResult(
+            email=str(auth_obj.get("email") or "").strip(),
+            account_id="",
+            storage_path=storage_path,
+            auth=result_auth,
+            phone_verification_required=True,
+            page_type=str(getattr(protocol_result, "page_type", "") or "add_phone").strip(),
+            final_url=str(getattr(protocol_result, "final_url", "") or "").strip(),
+            resume_context=dict(getattr(protocol_result, "resume_context", {}) or {}),
+        )
 
     refreshed_mailbox_ref = str(auth_obj.get("mailbox_ref") or "").strip()
     refreshed_session_id = str(auth_obj.get("session_id") or "").strip()

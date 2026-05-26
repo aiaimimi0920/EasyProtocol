@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -47,7 +47,11 @@ class ProtocolOAuthResult:
     email: str
     account_id: str
     storage_path: str
-    auth: dict[str, Any]
+    auth: dict[str, Any] = field(default_factory=dict)
+    phone_verification_required: bool = False
+    page_type: str = ""
+    final_url: str = ""
+    resume_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
