@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import sys
 import os
 import tempfile
@@ -231,6 +232,79 @@ class EasyProtocolFlowTests(unittest.TestCase):
         run_protocol_oauth_from_path.assert_called_once()
         self.assertEqual("email", result["authMode"])
         self.assertFalse(bool(result.get("refreshOnly")))
+
+    def test_run_protocol_oauth_once_returns_phone_verification_required_result(self) -> None:
+        seed_payload = {
+            "email": "user@example.com",
+            "password": "pw",
+            "mailboxRef": "mailtm:test",
+            "mailboxSessionId": "mailbox_123",
+            "firstName": "User",
+            "lastName": "Example",
+            "birthdate": "2000-01-01",
+        }
+
+        class _FlowProxy:
+            proxy_url = "http://easy-proxy:25000"
+
+        with mock.patch.object(
+            protocol_oauth,
+            "_refresh_seed_mailbox_binding",
+            return_value=(
+                {
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailbox_ref": "mailtm:test",
+                    "session_id": "mailbox_123",
+                    "first_name": "User",
+                    "last_name": "Example",
+                    "birthdate": "2000-01-01",
+                },
+                {},
+            ),
+        ), mock.patch.object(
+            protocol_oauth,
+            "_ensure_protocol_oauth_easy_runtime_defaults",
+        ), mock.patch.object(
+            protocol_oauth,
+            "flow_network_env",
+            return_value=contextlib.nullcontext(),
+        ), mock.patch.object(
+            protocol_oauth,
+            "lease_flow_proxy",
+            return_value=contextlib.nullcontext(_FlowProxy()),
+        ), mock.patch.object(
+            protocol_oauth,
+            "run_protocol_repair_once",
+            return_value=protocol_register.ProtocolRegistrationResult(
+                email="user@example.com",
+                auth={"mailboxRef": "mailtm:test"},
+                phone_verification_required=True,
+                page_type="add_phone",
+                final_url="https://auth.openai.com/add-phone",
+                resume_context={"continueUrl": "https://auth.openai.com/add-phone", "token": "resume_123"},
+            ),
+        ), mock.patch.object(
+            protocol_oauth,
+            "persist_first_phone_record",
+            return_value="C:/tmp/first-phone.json",
+        ) as persist_first_phone_record, mock.patch.object(
+            protocol_oauth,
+            "persist_success_auth_json",
+        ) as persist_success_auth_json, mock.patch.object(
+            protocol_oauth,
+            "release_mailbox_sessions_by_email",
+            return_value=[],
+        ):
+            result = protocol_oauth.run_protocol_oauth_once(seed_payload=seed_payload, output_dir="C:/tmp/out")
+
+        self.assertTrue(result.phone_verification_required)
+        self.assertEqual("add_phone", result.page_type)
+        self.assertEqual("https://auth.openai.com/add-phone", result.final_url)
+        self.assertEqual("resume_123", result.resume_context["token"])
+        self.assertEqual("C:/tmp/first-phone.json", result.storage_path)
+        persist_first_phone_record.assert_called_once()
+        persist_success_auth_json.assert_not_called()
 
     def test_obtain_codex_oauth_phone_wall_result_contains_resume_context(self) -> None:
         with mock.patch.object(
