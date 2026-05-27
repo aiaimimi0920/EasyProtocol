@@ -67,6 +67,7 @@ PASSWORD_VERIFY_URL = f"{AUTH_BASE}/api/accounts/password/verify"
 EMAIL_OTP_SEND_URL = f"{AUTH_BASE}/api/accounts/email-otp/send"
 EMAIL_OTP_VALIDATE_URL = f"{AUTH_BASE}/api/accounts/email-otp/validate"
 PASSWORDLESS_SEND_OTP_URL = f"{AUTH_BASE}/api/accounts/passwordless/send-otp"
+ADD_PHONE_SEND_URL = f"{AUTH_BASE}/api/accounts/add-phone/send"
 CREATE_ACCOUNT_URL = f"{AUTH_BASE}/api/accounts/create_account"
 WORKSPACE_SELECT_URL = f"{AUTH_BASE}/api/accounts/workspace/select"
 CLIENT_AUTH_SESSION_DUMP_URL = f"{AUTH_BASE}/api/accounts/client_auth_session_dump"
@@ -179,6 +180,11 @@ SENTINEL_HEADER_WHITELIST = frozenset({
     "platform-update-organization",
     "repair-authorize-continue",
     "repair-password-verify",
+})
+PHONE_VERIFICATION_TERMINAL_CODES = frozenset({
+    "phone_number_in_use",
+    "phone_max_usage_exceeded",
+    "rate_limit_exceeded",
 })
 _FORM_RE = re.compile(r"<form\b(?P<attrs>[^>]*)>(?P<body>.*?)</form>", re.IGNORECASE | re.DOTALL)
 _INPUT_RE = re.compile(r"<input\b(?P<attrs>[^>]*)/?>", re.IGNORECASE | re.DOTALL)
@@ -5990,6 +5996,159 @@ def _raise_if_phone_wall_response(response: Any, *, context: str) -> None:
     )
 
 
+def _resume_context_browser_user_agent(resume_context: dict[str, Any]) -> str:
+    browser_context = resume_context.get("browser") if isinstance(resume_context.get("browser"), dict) else {}
+    return str(browser_context.get("userAgent") or DEFAULT_PROTOCOL_USER_AGENT).strip() or DEFAULT_PROTOCOL_USER_AGENT
+
+
+def _resume_context_browser_device_id(resume_context: dict[str, Any]) -> str:
+    browser_context = resume_context.get("browser") if isinstance(resume_context.get("browser"), dict) else {}
+    return str(browser_context.get("deviceId") or "").strip()
+
+
+def _phone_resume_request_kinds(resume_context: dict[str, Any]) -> tuple[str, ...]:
+    context = str(resume_context.get("context") or "").strip().lower()
+    candidates: list[str] = []
+    if "repair" in context:
+        candidates.extend(("repair-password-verify", "repair-authorize-continue"))
+    else:
+        candidates.extend(("repair-password-verify", "repair-authorize-continue"))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    return tuple(normalized)
+
+
+def _phone_resume_sentinel_context(
+    *,
+    resume_context: dict[str, Any],
+    session: requests.Session,
+    explicit_proxy: str | None,
+) -> ProtocolSentinelContext:
+    user_agent = _resume_context_browser_user_agent(resume_context)
+    device_id = _resume_context_browser_device_id(resume_context)
+    sentinel_context = _new_protocol_sentinel_context(
+        session,
+        explicit_proxy=explicit_proxy,
+        user_agent=user_agent,
+    )
+    if device_id:
+        sentinel_context = _clone_protocol_sentinel_context(
+            sentinel_context,
+            device_id=device_id,
+        )
+    return sentinel_context
+
+
+def _build_phone_verification_terminal_result(
+    *,
+    resume_context: dict[str, Any],
+    session: requests.Session,
+    phone_number: str,
+    response: Any,
+) -> dict[str, Any]:
+    page_type = _extract_page_type(response) or "add_phone"
+    continue_url = str(resume_context.get("continueUrl") or "").strip()
+    error_code = _response_error_code(response) or "phone_verification_terminal"
+    error_message = _response_error_message(response) or _response_preview(response, 240)
+    try:
+        status_code = int(getattr(response, "status_code", 0) or 0)
+    except Exception:
+        status_code = 0
+    return {
+        "status": "phone_verification_terminal",
+        "pageType": page_type,
+        "resumeContext": {
+            **dict(resume_context or {}),
+            "continueUrl": continue_url,
+            "currentUrl": continue_url,
+            "pageType": page_type,
+            "phoneNumber": str(phone_number or "").strip(),
+            "sessionCookies": _export_protocol_session_cookies(session),
+        },
+        "phoneVerificationAttempted": True,
+        "phoneVerificationTerminal": True,
+        "phoneVerificationTerminalCode": error_code,
+        "phoneVerificationTerminalMessage": error_message,
+        "phoneVerificationTerminalStatusCode": status_code,
+    }
+
+
+def _submit_phone_number_via_protocol_session(
+    *,
+    resume_context: dict[str, Any],
+    session: requests.Session,
+    phone_number: str,
+    explicit_proxy: str | None,
+) -> dict[str, Any]:
+    continue_url = str(resume_context.get("continueUrl") or "").strip()
+    if not continue_url:
+        raise RuntimeError("phone_resume_missing_continue_url")
+    payload = json.dumps({"phone_number": str(phone_number or "").strip()})
+    last_error: str = ""
+    for request_kind in _phone_resume_request_kinds(resume_context):
+        sentinel_context = _phone_resume_sentinel_context(
+            resume_context=resume_context,
+            session=session,
+            explicit_proxy=explicit_proxy,
+        )
+        headers = _build_protocol_headers(
+            request_kind=request_kind,
+            referer=continue_url,
+            sentinel_context=sentinel_context,
+        )
+        response = _session_request(
+            session,
+            "POST",
+            ADD_PHONE_SEND_URL,
+            explicit_proxy=explicit_proxy,
+            request_label=f"resume-phone-send:{request_kind}",
+            headers=headers,
+            data=payload,
+        )
+        if _response_has_cloudflare_challenge(response):
+            last_error = (
+                f"phone_number_send_cloudflare_challenge request_kind={request_kind} "
+                f"status={getattr(response, 'status_code', 0)}"
+            )
+            continue
+        error_code = _response_error_code(response)
+        if error_code in PHONE_VERIFICATION_TERMINAL_CODES:
+            return _build_phone_verification_terminal_result(
+                resume_context=resume_context,
+                session=session,
+                phone_number=phone_number,
+                response=response,
+            )
+        if int(getattr(response, "status_code", 0) or 0) >= 400:
+            last_error = (
+                f"phone_number_send status={getattr(response, 'status_code', 0)} "
+                f"body={_response_preview(response, 240)}"
+            )
+            continue
+        page_type = _extract_page_type(response) or "sms_verification"
+        return {
+            "status": "phone_number_submitted",
+            "pageType": page_type,
+            "resumeContext": {
+                **dict(resume_context or {}),
+                "continueUrl": continue_url,
+                "currentUrl": continue_url,
+                "pageType": page_type,
+                "phoneNumber": str(phone_number or "").strip(),
+                "sessionCookies": _export_protocol_session_cookies(session),
+            },
+        }
+    if last_error:
+        raise RuntimeError(last_error)
+    raise RuntimeError("phone_number_send_failed")
+
+
 def submit_phone_number_for_resume(
     *,
     source_payload: dict[str, Any],
@@ -6001,6 +6160,18 @@ def submit_phone_number_for_resume(
     if not continue_url:
         raise RuntimeError("phone_resume_missing_continue_url")
     session = _restore_protocol_session_from_resume_context(resume_context)
+    direct_session_error: BaseException | None = None
+    try:
+        direct_result = _submit_phone_number_via_protocol_session(
+            resume_context=resume_context,
+            session=session,
+            phone_number=phone_number,
+            explicit_proxy=explicit_proxy,
+        )
+        if isinstance(direct_result, dict) and direct_result:
+            return direct_result
+    except Exception as exc:
+        direct_session_error = exc
     new_driver = _load_protocol_browser_new_driver()
     driver = None
     proxy_dir = None
@@ -6011,7 +6182,14 @@ def submit_phone_number_for_resume(
         )
         _hydrate_browser_driver_with_protocol_session_cookies(driver, session=session)
         driver.get(continue_url)
-        if not _browser_try_submit_phone_number(driver, phone_number=str(phone_number or "").strip()):
+        submitted = False
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if _browser_try_submit_phone_number(driver, phone_number=str(phone_number or "").strip()):
+                submitted = True
+                break
+            time.sleep(0.5)
+        if not submitted:
             raise RuntimeError("phone_number_submit_failed")
         time.sleep(1.5)
         _import_browser_driver_cookies_into_session(session, driver=driver)
@@ -6028,6 +6206,10 @@ def submit_phone_number_for_resume(
                 "sessionCookies": _export_protocol_session_cookies(session),
             },
         }
+    except Exception:
+        if direct_session_error is not None:
+            raise direct_session_error
+        raise
     finally:
         if driver is not None:
             try:
@@ -6069,7 +6251,14 @@ def submit_phone_verification_code_for_resume(
         )
         _hydrate_browser_driver_with_protocol_session_cookies(driver, session=session)
         driver.get(continue_url)
-        if not _browser_try_submit_phone_code(driver, sms_code=str(sms_code or "").strip()):
+        submitted = False
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if _browser_try_submit_phone_code(driver, sms_code=str(sms_code or "").strip()):
+                submitted = True
+                break
+            time.sleep(0.5)
+        if not submitted:
             raise RuntimeError("phone_code_submit_failed")
         time.sleep(2.0)
         _import_browser_driver_cookies_into_session(session, driver=driver)
@@ -9695,6 +9884,17 @@ def run_protocol_repair_once(
                 )
             oauth_entry_response = otp_validate_response
             oauth_entry_referer = EMAIL_VERIFICATION_REFERER
+        elif _is_phone_wall_page_type(page_type):
+            return _build_phone_verification_required_result(
+                email=email,
+                auth_obj=auth_obj,
+                response=oauth_entry_response,
+                context="repair_page_type",
+                session=session,
+                oauth=oauth,
+                user_agent=sentinel_context.user_agent,
+                device_id=sentinel_context.device_id,
+            )
         elif page_type == "sign_in_with_chatgpt_codex_consent":
             print("[python-protocol-service] consent page already active after password verify")
         elif page_type == "workspace":

@@ -61,12 +61,22 @@ def submit_phone_verification_number_from_path(
         phone_number=str(phone_number or "").strip(),
         explicit_proxy=explicit_proxy,
     )
-    return {
+    result = {
         "ok": True,
-        "status": "phone_number_submitted",
+        "status": str(response.get("status") or "").strip() or "phone_number_submitted",
         "pageType": str(response.get("pageType") or "").strip(),
         "resumeContext": dict(response.get("resumeContext") or resume_context or {}),
     }
+    for field_name in (
+        "phoneVerificationAttempted",
+        "phoneVerificationTerminal",
+        "phoneVerificationTerminalCode",
+        "phoneVerificationTerminalMessage",
+        "phoneVerificationTerminalStatusCode",
+    ):
+        if field_name in response:
+            result[field_name] = response.get(field_name)
+    return result
 
 
 def submit_phone_verification_code_from_path(

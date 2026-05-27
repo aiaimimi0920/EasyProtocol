@@ -19,6 +19,7 @@ from new_protocol_register import easyprotocol_flow  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
 from new_protocol_register import protocol_chatgpt_login  # noqa: E402
 from new_protocol_register import protocol_oauth  # noqa: E402
+from new_protocol_register import protocol_phone_verification  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.others import runtime as protocol_runtime  # noqa: E402
 from protocol_runtime import protocol_register  # noqa: E402
@@ -468,6 +469,137 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("user@example.com", result["email"])
         self.assertEqual("user_123", result["auth"]["user_id"])
 
+    def test_submit_phone_number_for_resume_waits_for_phone_surface_before_failing(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "https://auth.openai.com/sms-verification"
+                self.title = "Phone number required"
+
+            def get(self, url: str) -> None:
+                self.current_url = "https://auth.openai.com/sms-verification"
+
+            def quit(self) -> None:
+                return None
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (_FakeDriver(), None),
+        ), mock.patch.object(
+            protocol_register,
+            "_submit_phone_number_via_protocol_session",
+            side_effect=RuntimeError("phone_number_send_unavailable"),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_number",
+            side_effect=[False, False, True],
+        ) as submit_phone_number, mock.patch.object(
+            protocol_register,
+            "_export_protocol_session_cookies",
+            return_value=[{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+        ), mock.patch.object(
+            protocol_register.time,
+            "sleep",
+            return_value=None,
+        ), mock.patch.object(
+            protocol_register.time,
+            "monotonic",
+            side_effect=[0.0, 0.1, 0.2, 0.3],
+        ):
+            result = protocol_register.submit_phone_number_for_resume(
+                source_payload={"email": "user@example.com"},
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/add-phone",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/api/accounts/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "https://chatgpt.com/api/auth/callback/openai",
+                    },
+                },
+                phone_number="+15551234567",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual(3, submit_phone_number.call_count)
+        self.assertEqual("sms_verification", result["pageType"])
+
+    def test_submit_phone_number_for_resume_returns_terminal_phone_result_without_browser(self) -> None:
+        with mock.patch.object(
+            protocol_register,
+            "_submit_phone_number_via_protocol_session",
+            return_value={
+                "status": "phone_verification_terminal",
+                "pageType": "add_phone",
+                "resumeContext": {"continueUrl": "https://auth.openai.com/add-phone"},
+                "phoneVerificationAttempted": True,
+                "phoneVerificationTerminal": True,
+                "phoneVerificationTerminalCode": "phone_number_in_use",
+                "phoneVerificationTerminalMessage": "Phone number already in use.",
+                "phoneVerificationTerminalStatusCode": 403,
+            },
+        ), mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+        ) as new_driver:
+            result = protocol_register.submit_phone_number_for_resume(
+                source_payload={"email": "user@example.com"},
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/add-phone",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/api/accounts/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "https://chatgpt.com/api/auth/callback/openai",
+                    },
+                },
+                phone_number="+15551234567",
+                explicit_proxy=None,
+            )
+
+        self.assertTrue(result["phoneVerificationAttempted"])
+        self.assertTrue(result["phoneVerificationTerminal"])
+        self.assertEqual("phone_number_in_use", result["phoneVerificationTerminalCode"])
+        new_driver.assert_not_called()
+
+    def test_submit_phone_verification_number_from_path_passes_through_terminal_phone_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "small-success.json"
+            source_path.write_text('{"email":"user@example.com"}', encoding="utf-8")
+            with mock.patch.object(
+                protocol_phone_verification.protocol_register,
+                "submit_phone_number_for_resume",
+                return_value={
+                    "status": "phone_verification_terminal",
+                    "pageType": "add_phone",
+                    "resumeContext": {"continueUrl": "https://auth.openai.com/add-phone"},
+                    "phoneVerificationAttempted": True,
+                    "phoneVerificationTerminal": True,
+                    "phoneVerificationTerminalCode": "rate_limit_exceeded",
+                    "phoneVerificationTerminalMessage": "Too many requests.",
+                    "phoneVerificationTerminalStatusCode": 403,
+                },
+            ):
+                result = protocol_phone_verification.submit_phone_verification_number_from_path(
+                    source_path=str(source_path),
+                    resume_context={"continueUrl": "https://auth.openai.com/add-phone"},
+                    phone_number="+15551234567",
+                )
+
+        self.assertEqual("phone_verification_terminal", result["status"])
+        self.assertTrue(result["phoneVerificationTerminal"])
+        self.assertEqual("rate_limit_exceeded", result["phoneVerificationTerminalCode"])
+
     def test_requested_email_candidates_prefer_cloudflare_for_mail_aiaimimi(self) -> None:
         with mock.patch.object(
             protocol_runtime,
@@ -600,6 +732,73 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(oauth_entry_response, otp_response)
         self.assertEqual("email_otp_verification", page_type)
         self.assertEqual(protocol_register.EMAIL_VERIFICATION_REFERER, oauth_entry_referer)
+
+    def test_run_protocol_repair_once_returns_phone_verification_required_when_password_verify_hits_add_phone(self) -> None:
+        session = mock.Mock()
+        session.headers = {}
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/api/accounts/authorize?x=1",
+            state="state_123",
+            code_verifier="verifier",
+            redirect_uri="https://chatgpt.com/api/auth/callback/openai",
+        )
+        signup_response = SimpleNamespace(status_code=200)
+        phone_response = SimpleNamespace(
+            status_code=200,
+            url="https://auth.openai.com/add-phone",
+        )
+        phone_response.json = lambda: {
+            "page": {"type": "add_phone"},
+            "continue_url": "https://auth.openai.com/add-phone",
+        }
+
+        with mock.patch.object(
+            protocol_register,
+            "generate_oauth_url",
+            return_value=oauth,
+        ), mock.patch.object(
+            protocol_register,
+            "get_mailbox_latest_message_id",
+            return_value=0,
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=[SimpleNamespace(status_code=200), signup_response],
+        ), mock.patch.object(
+            protocol_register,
+            "_get_session_cookie",
+            return_value="did_123",
+        ), mock.patch.object(
+            protocol_register,
+            "_build_protocol_headers",
+            return_value={},
+        ), mock.patch.object(
+            protocol_register,
+            "_resolve_repair_oauth_entry",
+            return_value=(phone_response, "add_phone", protocol_register.LOGIN_PASSWORD_REFERER),
+        ), mock.patch.object(
+            protocol_register,
+            "_export_protocol_session_cookies",
+            return_value=[{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+        ):
+            result = protocol_register.run_protocol_repair_once(
+                auth_obj={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailbox_ref": "mailtm:test",
+                    "session_id": "mailbox_123",
+                },
+                existing_session=session,
+                existing_sentinel_context=SimpleNamespace(user_agent="ua", device_id="device"),
+            )
+
+        self.assertTrue(result.phone_verification_required)
+        self.assertEqual("add_phone", result.page_type)
+        self.assertEqual("https://auth.openai.com/add-phone", result.final_url)
+        self.assertEqual("repair_page_type", result.resume_context["context"])
+        self.assertEqual("https://auth.openai.com/add-phone", result.resume_context["continueUrl"])
+        self.assertEqual("device", result.resume_context["browser"]["deviceId"])
+        self.assertEqual("state_123", result.resume_context["oauth"]["state"])
 
 
 if __name__ == "__main__":
