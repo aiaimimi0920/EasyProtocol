@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import ipaddress
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -18,6 +19,8 @@ EASY_PROXY_HOST_ID = (
     os.environ.get("EASY_PROXY_HOST_ID") or "python-protocol-buy-service"
 ).strip()
 EASY_PROXY_TTL_MINUTES = int(os.environ.get("EASY_PROXY_TTL_MINUTES") or "30")
+DEFAULT_EASY_PROXY_READY_TIMEOUT_SECONDS = 90
+DEFAULT_EASY_PROXY_READY_PROBE_INTERVAL_SECONDS = 2
 
 
 def _api_request(
@@ -27,8 +30,11 @@ def _api_request(
     *,
     base_url: str = "",
     api_key: str = "",
+    wait_for_ready: bool = True,
 ) -> dict[str, Any]:
     effective_base = (base_url or EASY_PROXY_BASE_URL).rstrip("/")
+    if wait_for_ready and _should_wait_for_easy_proxy(path):
+        _wait_easy_proxy_ready(effective_base, api_key=api_key)
     url = f"{effective_base}{path}"
     headers: dict[str, str] = {"Content-Type": "application/json"}
     effective_key = (api_key or EASY_PROXY_API_KEY).strip()
@@ -38,8 +44,7 @@ def _api_request(
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     opener = _build_management_opener(effective_base)
     try:
-        with opener.open(req, timeout=10) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        return _read_json_response(opener, req)
     except urllib.error.HTTPError as exc:
         error_body = ""
         try:
@@ -49,6 +54,76 @@ def _api_request(
         raise RuntimeError(
             f"EasyProxy API {method} {path} returned {exc.code}: {error_body}"
         ) from exc
+
+
+def _read_json_response(opener: urllib.request.OpenerDirector, req: urllib.request.Request) -> dict[str, Any]:
+    with opener.open(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _should_wait_for_easy_proxy(path: str) -> bool:
+    normalized = str(path or "").strip().lower()
+    return normalized.startswith("/api/nodes") or normalized.startswith("/proxy/leases/checkout")
+
+
+def _resolve_easy_proxy_ready_timeout_seconds() -> int:
+    raw = str(os.environ.get("EASY_PROXY_READY_TIMEOUT_SECONDS") or "").strip()
+    try:
+        return max(1, int(raw or DEFAULT_EASY_PROXY_READY_TIMEOUT_SECONDS))
+    except Exception:
+        return DEFAULT_EASY_PROXY_READY_TIMEOUT_SECONDS
+
+
+def _resolve_easy_proxy_ready_probe_interval_seconds() -> int:
+    raw = str(os.environ.get("EASY_PROXY_READY_PROBE_INTERVAL_SECONDS") or "").strip()
+    try:
+        return max(1, int(raw or DEFAULT_EASY_PROXY_READY_PROBE_INTERVAL_SECONDS))
+    except Exception:
+        return DEFAULT_EASY_PROXY_READY_PROBE_INTERVAL_SECONDS
+
+
+def _wait_easy_proxy_ready(base_url: str, *, api_key: str = "") -> None:
+    deadline = time.time() + _resolve_easy_proxy_ready_timeout_seconds()
+    interval = _resolve_easy_proxy_ready_probe_interval_seconds()
+    last_error: Exception | None = None
+    opener = _build_management_opener(base_url)
+    effective_key = (api_key or EASY_PROXY_API_KEY).strip()
+    headers: dict[str, str] = {}
+    if effective_key:
+        headers["Authorization"] = f"Bearer {effective_key}"
+
+    filtered_probe_url = f"{base_url.rstrip('/')}/api/nodes?only_available=1&prefer_available=1"
+    fallback_probe_url = f"{base_url.rstrip('/')}/api/nodes"
+    while time.time() < deadline:
+        for probe_url, allow_local_filter in (
+            (filtered_probe_url, False),
+            (fallback_probe_url, True),
+        ):
+            try:
+                req = urllib.request.Request(probe_url, headers=headers, method="GET")
+                payload = _read_json_response(opener, req)
+                available_nodes = int(payload.get("available_nodes") or 0)
+                if allow_local_filter and available_nodes <= 0:
+                    available_nodes = len(
+                        _normalize_node_list(
+                            payload,
+                            only_available=True,
+                            prefer_available=True,
+                        )
+                    )
+                if available_nodes > 0:
+                    return
+                last_error = RuntimeError(
+                    f"EasyProxy not ready: available_nodes={available_nodes}"
+                )
+                if allow_local_filter:
+                    break
+            except Exception as exc:
+                last_error = exc
+                if allow_local_filter:
+                    break
+        time.sleep(interval)
+    raise RuntimeError(f"EasyProxy not ready after wait: {last_error}") from last_error
 
 
 def _build_management_opener(base_url: str) -> urllib.request.OpenerDirector:
@@ -71,6 +146,33 @@ def _build_management_opener(base_url: str) -> urllib.request.OpenerDirector:
     if should_bypass_proxy:
         return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return urllib.request.build_opener()
+
+
+def _node_marked_available(node: dict[str, Any]) -> bool:
+    return bool(node.get("effective_available") or node.get("available"))
+
+
+def _node_sort_key(node: dict[str, Any]) -> tuple[int, int]:
+    try:
+        score = int(node.get("availability_score") or 0)
+    except Exception:
+        score = 0
+    return (0 if _node_marked_available(node) else 1, -score)
+
+
+def _normalize_node_list(
+    payload: dict[str, Any],
+    *,
+    only_available: bool,
+    prefer_available: bool,
+) -> list[dict[str, Any]]:
+    nodes = payload.get("nodes") or []
+    normalized = [node for node in nodes if isinstance(node, dict)]
+    if only_available:
+        normalized = [node for node in normalized if _node_marked_available(node)]
+    if prefer_available:
+        normalized.sort(key=_node_sort_key)
+    return normalized
 
 
 def checkout_proxy(
@@ -122,7 +224,27 @@ def list_available_nodes(
     if prefer_available:
         query.append("prefer_available=1")
     suffix = f"?{'&'.join(query)}" if query else ""
-    payload = _api_request("GET", f"/api/nodes{suffix}", base_url=base_url, api_key=api_key)
+    path = f"/api/nodes{suffix}"
+    fallback_used = False
+    try:
+        payload = _api_request("GET", path, base_url=base_url, api_key=api_key)
+    except Exception:
+        if not suffix:
+            raise
+        payload = _api_request(
+            "GET",
+            "/api/nodes",
+            base_url=base_url,
+            api_key=api_key,
+            wait_for_ready=False,
+        )
+        fallback_used = True
+    if fallback_used:
+        return _normalize_node_list(
+            payload,
+            only_available=only_available,
+            prefer_available=prefer_available,
+        )
     nodes = payload.get("nodes") or []
     if not isinstance(nodes, list):
         return []
