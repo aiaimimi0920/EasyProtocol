@@ -208,7 +208,7 @@ def _normalize_seed_payload(seed_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS = 15 * 60
+DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS = 0
 
 
 def _resolve_reuse_seed_mailbox_max_age_seconds() -> int:
@@ -242,10 +242,19 @@ def _should_reuse_seed_mailbox_binding(auth_obj: dict[str, Any]) -> bool:
     previous_session_id = str(auth_obj.get("session_id") or "").strip()
     if not previous_mailbox_ref or not previous_session_id:
         return False
-    created_at = _parse_created_at(str(auth_obj.get("created_at") or "").strip())
-    if created_at is None:
+    if str(os.environ.get("PROTOCOL_OAUTH_FORCE_REFRESH_SEED_MAILBOX_BINDING") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
         return False
     max_age_seconds = _resolve_reuse_seed_mailbox_max_age_seconds()
+    if max_age_seconds <= 0:
+        return True
+    created_at = _parse_created_at(str(auth_obj.get("created_at") or "").strip())
+    if created_at is None:
+        return True
     age_seconds = (dt.datetime.now(dt.timezone.utc) - created_at).total_seconds()
     return 0 <= age_seconds <= max_age_seconds
 

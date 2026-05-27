@@ -334,7 +334,7 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual(auth_obj["session_id"], updated_auth["session_id"])
         self.assertEqual("reuse_existing", refresh["strategy"])
 
-    def test_refresh_seed_mailbox_binding_recreates_stale_binding(self) -> None:
+    def test_refresh_seed_mailbox_binding_reuses_stale_existing_binding(self) -> None:
         created_at = (
             dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)
         ).isoformat().replace("+00:00", "Z")
@@ -343,6 +343,28 @@ class EasyProtocolFlowTests(unittest.TestCase):
             "mailbox_ref": "moemail:old-ref",
             "session_id": "mailbox_old",
             "created_at": created_at,
+        }
+        with mock.patch.object(
+            protocol_oauth,
+            "release_mailbox_sessions_by_email",
+        ) as release_mailbox_sessions_by_email, mock.patch.object(
+            protocol_oauth,
+            "resolve_mailbox",
+        ) as resolve_mailbox:
+            updated_auth, refresh = protocol_oauth._refresh_seed_mailbox_binding(auth_obj)
+
+        release_mailbox_sessions_by_email.assert_not_called()
+        resolve_mailbox.assert_not_called()
+        self.assertEqual("mailbox_old", updated_auth["session_id"])
+        self.assertEqual("moemail:old-ref", updated_auth["mailbox_ref"])
+        self.assertEqual("reuse_existing", refresh["strategy"])
+
+    def test_refresh_seed_mailbox_binding_recreates_when_session_binding_missing(self) -> None:
+        auth_obj = {
+            "email": "user@example.com",
+            "mailbox_ref": "",
+            "session_id": "",
+            "created_at": "",
         }
         resolved_mailbox = protocol_runtime.Mailbox(
             provider="moemail",
@@ -354,7 +376,7 @@ class EasyProtocolFlowTests(unittest.TestCase):
         with mock.patch.object(
             protocol_oauth,
             "release_mailbox_sessions_by_email",
-            return_value=[{"sessionId": "mailbox_old"}],
+            return_value=[],
         ) as release_mailbox_sessions_by_email, mock.patch.object(
             protocol_oauth,
             "resolve_mailbox",
