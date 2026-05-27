@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import sys
 import os
 import tempfile
@@ -306,6 +307,66 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("C:/tmp/first-phone.json", result.storage_path)
         persist_first_phone_record.assert_called_once()
         persist_success_auth_json.assert_not_called()
+
+    def test_refresh_seed_mailbox_binding_reuses_recent_existing_binding(self) -> None:
+        created_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2)
+        ).isoformat().replace("+00:00", "Z")
+        auth_obj = {
+            "email": "prudence96e088@pek.blaizesmp.net",
+            "mailbox_ref": "tempmail-lol:tempmail_lol_shared_default:%7Bdemo%7D",
+            "session_id": "mailbox_20260527131801_1762",
+            "created_at": created_at,
+        }
+
+        with mock.patch.object(
+            protocol_oauth,
+            "release_mailbox_sessions_by_email",
+        ) as release_mailbox_sessions_by_email, mock.patch.object(
+            protocol_oauth,
+            "resolve_mailbox",
+        ) as resolve_mailbox:
+            updated_auth, refresh = protocol_oauth._refresh_seed_mailbox_binding(auth_obj)
+
+        release_mailbox_sessions_by_email.assert_not_called()
+        resolve_mailbox.assert_not_called()
+        self.assertEqual(auth_obj["mailbox_ref"], updated_auth["mailbox_ref"])
+        self.assertEqual(auth_obj["session_id"], updated_auth["session_id"])
+        self.assertEqual("reuse_existing", refresh["strategy"])
+
+    def test_refresh_seed_mailbox_binding_recreates_stale_binding(self) -> None:
+        created_at = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)
+        ).isoformat().replace("+00:00", "Z")
+        auth_obj = {
+            "email": "user@example.com",
+            "mailbox_ref": "moemail:old-ref",
+            "session_id": "mailbox_old",
+            "created_at": created_at,
+        }
+        resolved_mailbox = protocol_runtime.Mailbox(
+            provider="moemail",
+            email="user@example.com",
+            ref="moemail:new-ref",
+            session_id="mailbox_new",
+        )
+
+        with mock.patch.object(
+            protocol_oauth,
+            "release_mailbox_sessions_by_email",
+            return_value=[{"sessionId": "mailbox_old"}],
+        ) as release_mailbox_sessions_by_email, mock.patch.object(
+            protocol_oauth,
+            "resolve_mailbox",
+            return_value=resolved_mailbox,
+        ) as resolve_mailbox:
+            updated_auth, refresh = protocol_oauth._refresh_seed_mailbox_binding(auth_obj)
+
+        release_mailbox_sessions_by_email.assert_called_once()
+        resolve_mailbox.assert_called_once()
+        self.assertEqual("mailbox_new", updated_auth["session_id"])
+        self.assertEqual("moemail:new-ref", updated_auth["mailbox_ref"])
+        self.assertEqual("recreate_existing", refresh["strategy"])
 
     def test_obtain_codex_oauth_phone_wall_result_contains_resume_context(self) -> None:
         with mock.patch.object(

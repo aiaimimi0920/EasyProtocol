@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import json
 import os
 import re
@@ -203,7 +204,50 @@ def _normalize_seed_payload(seed_payload: dict[str, Any]) -> dict[str, Any]:
         "first_name": str(seed_payload.get("firstName") or seed_payload.get("first_name") or "").strip(),
         "last_name": str(seed_payload.get("lastName") or seed_payload.get("last_name") or "").strip(),
         "birthdate": str(seed_payload.get("birthdate") or "").strip(),
+        "created_at": str(seed_payload.get("createdAt") or seed_payload.get("created_at") or "").strip(),
     }
+
+
+DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS = 15 * 60
+
+
+def _resolve_reuse_seed_mailbox_max_age_seconds() -> int:
+    raw = str(
+        os.environ.get("PROTOCOL_OAUTH_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS")
+        or DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS
+    ).strip()
+    try:
+        return max(0, int(float(raw or DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS)))
+    except Exception:
+        return DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS
+
+
+def _parse_created_at(created_at: str) -> dt.datetime | None:
+    value = str(created_at or "").strip()
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        parsed = dt.datetime.fromisoformat(value)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _should_reuse_seed_mailbox_binding(auth_obj: dict[str, Any]) -> bool:
+    previous_mailbox_ref = str(auth_obj.get("mailbox_ref") or "").strip()
+    previous_session_id = str(auth_obj.get("session_id") or "").strip()
+    if not previous_mailbox_ref or not previous_session_id:
+        return False
+    created_at = _parse_created_at(str(auth_obj.get("created_at") or "").strip())
+    if created_at is None:
+        return False
+    max_age_seconds = _resolve_reuse_seed_mailbox_max_age_seconds()
+    age_seconds = (dt.datetime.now(dt.timezone.utc) - created_at).total_seconds()
+    return 0 <= age_seconds <= max_age_seconds
 
 
 def _refresh_seed_mailbox_binding(auth_obj: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -212,6 +256,26 @@ def _refresh_seed_mailbox_binding(auth_obj: dict[str, Any]) -> tuple[dict[str, A
         raise RuntimeError("protocol_oauth_requires_seed_email")
     previous_mailbox_ref = str(auth_obj.get("mailbox_ref") or "").strip()
     previous_session_id = str(auth_obj.get("session_id") or "").strip()
+    if _should_reuse_seed_mailbox_binding(auth_obj):
+        refresh_details = {
+            "email": email,
+            "provider": previous_mailbox_ref.split(":", 1)[0].strip() if previous_mailbox_ref else "",
+            "mailboxRef": previous_mailbox_ref,
+            "sessionId": previous_session_id,
+            "previousMailboxRef": previous_mailbox_ref,
+            "previousSessionId": previous_session_id,
+            "preRefreshCleanup": [],
+            "strategy": "reuse_existing",
+        }
+        updated_auth = dict(auth_obj)
+        updated_auth["email"] = refresh_details["email"]
+        updated_auth["mailbox_ref"] = refresh_details["mailboxRef"]
+        updated_auth["mailboxRef"] = refresh_details["mailboxRef"]
+        updated_auth["mailboxAccessKey"] = refresh_details["mailboxRef"]
+        updated_auth["session_id"] = refresh_details["sessionId"]
+        updated_auth["mailboxSessionId"] = refresh_details["sessionId"]
+        updated_auth["mailboxRefresh"] = refresh_details
+        return updated_auth, refresh_details
     pre_refresh_cleanup = release_mailbox_sessions_by_email(
         email_address=email,
         reason="protocol_oauth_pre_refresh_cleanup",
@@ -230,6 +294,7 @@ def _refresh_seed_mailbox_binding(auth_obj: dict[str, Any]) -> tuple[dict[str, A
         "previousMailboxRef": previous_mailbox_ref,
         "previousSessionId": previous_session_id,
         "preRefreshCleanup": pre_refresh_cleanup,
+        "strategy": "recreate_existing",
     }
     updated_auth = dict(auth_obj)
     updated_auth["email"] = refresh_details["email"]
