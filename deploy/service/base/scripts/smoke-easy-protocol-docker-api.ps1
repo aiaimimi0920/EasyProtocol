@@ -39,13 +39,36 @@ import yaml
 
 path = Path(r"__SMOKE_CONFIG_PATH__")
 data = yaml.safe_load(path.read_text(encoding="utf-8"))
-provider_pool = (((data.get("serviceBase") or {}).get("runtime") or {}).get("provider_pool") or {}).get("providers") or {}
-for family in provider_pool.values():
-    if isinstance(family, dict) and "warm_replicas" in family:
-        family["warm_replicas"] = 0
-managed_runtime = (((data.get("serviceBase") or {}).get("runtime") or {}).get("managed_provider_runtime") or {})
-if isinstance(managed_runtime, dict):
-    managed_runtime["enabled"] = False
+
+def disable_legacy_runtime_tree(root: dict) -> None:
+    provider_pool = (((root.get("serviceBase") or {}).get("runtime") or {}).get("provider_pool") or {}).get("providers") or {}
+    for family in provider_pool.values():
+        if isinstance(family, dict) and "warm_replicas" in family:
+            family["warm_replicas"] = 0
+    managed_runtime = (((root.get("serviceBase") or {}).get("runtime") or {}).get("managed_provider_runtime") or {})
+    if isinstance(managed_runtime, dict):
+        managed_runtime["enabled"] = False
+
+
+def disable_current_runtime_tree(root: dict) -> None:
+    services = root.get("services") or []
+    if isinstance(services, list):
+        for service in services:
+            if isinstance(service, dict):
+                service["enabled"] = False
+
+    managed_runtime = root.get("managed_provider_runtime") or {}
+    if isinstance(managed_runtime, dict):
+        managed_runtime["enabled"] = False
+        providers = managed_runtime.get("providers") or {}
+        if isinstance(providers, dict):
+            for family in providers.values():
+                if isinstance(family, dict):
+                    family["enabled"] = False
+
+
+disable_legacy_runtime_tree(data)
+disable_current_runtime_tree(data)
 path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 '@.Replace('__SMOKE_CONFIG_PATH__', $smokeConfigPath.Replace('\', '\\')) | python -
 
