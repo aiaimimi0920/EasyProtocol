@@ -12,6 +12,10 @@ on:
         description: 'Override release version'
         required: false
         default: ''
+      release_tag:
+        description: 'Standard release tag override; takes precedence over version'
+        required: false
+        default: ''
       platform:
         description: 'Docker build platform list'
         required: false
@@ -107,11 +111,17 @@ jobs:
 
       - name: Resolve Release Metadata
         id: release_meta
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          VERSION_INPUT: ${{ inputs.version }}
         shell: bash
         run: |
           set -euo pipefail
 
-          version="${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}"
+          version=""
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${RELEASE_TAG_INPUT:-${VERSION_INPUT:-}}"
+          fi
           if [[ -z "${version}" ]]; then
             if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
               version="${GITHUB_REF_NAME}"
@@ -131,6 +141,7 @@ jobs:
 
           {
             echo "version=${version}"
+            echo "release_tag=${version}"
             echo "short_sha=${short_sha}"
             echo "image_ref=${image_ref}"
             echo "smoke_image=${smoke_image}"

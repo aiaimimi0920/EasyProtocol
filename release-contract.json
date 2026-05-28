@@ -1,0 +1,53 @@
+{
+    "schemaVersion":  1,
+    "project":  "EasyProtocol",
+    "releaseClass":  "service-base-plus-providers",
+    "workflows":  [
+                      {
+                          "component":  "service-base",
+                          "requiresImportCode":  true,
+                          "releaseTagOutputs":  [
+                                                    "release_tag",
+                                                    "version"
+                                                ],
+                          "artifacts":  [
+                                            "service-base-release-manifest",
+                                            "service-base-r2-config-manifest",
+                                            "service-base-import-code-encrypted"
+                                        ],
+                          "releaseTagInputs":  [
+                                                   "release_tag",
+                                                   "version"
+                                               ],
+                          "requiresR2":  true,
+                          "path":  ".github/workflows/publish-service-base-ghcr.yml",
+                          "requiresGhcr":  true
+                      },
+                      {
+                          "component":  "providers",
+                          "requiresImportCode":  false,
+                          "releaseTagOutputs":  [
+                                                    "release_tag",
+                                                    "version"
+                                                ],
+                          "artifacts":  [
+
+                                        ],
+                          "releaseTagInputs":  [
+                                                   "release_tag",
+                                                   "version"
+                                               ],
+                          "requiresR2":  false,
+                          "path":  ".github/workflows/publish-provider-images-ghcr.yml",
+                          "requiresGhcr":  true
+                      }
+                  ],
+    "localDeploy":  {
+                        "entrypoint":  "deploy-host.ps1",
+                        "zeroFolder":  true,
+                        "forbidDevSourceBindMounts":  true
+                    },
+    "exceptions":  [
+                       "Provider images publish independently and do not carry R2/import-code config bundles."
+                   ]
+}

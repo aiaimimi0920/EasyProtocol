@@ -44,3 +44,6 @@ jobs:
         shell: pwsh
         run: ./scripts/test-all.ps1 -ConfigPath ./config.yaml
 
+      - name: Validate Release Contract
+        shell: pwsh
+        run: python scripts/validate-release-contract.py
