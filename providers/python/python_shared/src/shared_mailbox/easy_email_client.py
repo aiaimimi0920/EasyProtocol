@@ -785,5 +785,10 @@ def get_mailbox_latest_message_id(
     code_obj = response.get("code")
     if not isinstance(code_obj, dict):
         return 0
-    return _mail_dispatch_code_marker(code_obj)
+    marker = _mail_dispatch_code_marker(code_obj)
+    if marker > 0:
+        return marker
+    if _select_openai_verification_code(code_obj):
+        return int(time.time())
+    return 0
 

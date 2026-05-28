@@ -15,6 +15,10 @@ SRC_ROOT = Path(__file__).resolve().parents[1] / "providers" / "python" / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+PYTHON_SHARED_ROOT = Path(__file__).resolve().parents[1] / "providers" / "python" / "python_shared" / "src"
+if str(PYTHON_SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SHARED_ROOT))
+
 from new_protocol_register.easyprotocol_flow import _update_team_expand_progress_payload  # noqa: E402
 from new_protocol_register import easyprotocol_flow  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
@@ -24,6 +28,7 @@ from new_protocol_register import protocol_phone_verification  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.others import runtime as protocol_runtime  # noqa: E402
 from protocol_runtime import protocol_register  # noqa: E402
+from shared_mailbox import easy_email_client  # noqa: E402
 from shared_captcha import service_client as captcha_service_client  # noqa: E402
 from new_protocol_register.protocol_small_success import (  # noqa: E402
     PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV,
@@ -34,6 +39,16 @@ from new_protocol_register.protocol_small_success import (  # noqa: E402
 
 
 class EasyProtocolFlowTests(unittest.TestCase):
+    def test_get_mailbox_latest_message_id_uses_wall_clock_when_existing_code_has_no_marker(self) -> None:
+        with mock.patch.object(
+            easy_email_client,
+            "_get_json",
+            return_value={"code": {"code": "123456"}},
+        ), mock.patch.object(easy_email_client.time, "time", return_value=1779975000.9):
+            marker = easy_email_client.get_mailbox_latest_message_id(session_id="mailbox_123")
+
+        self.assertEqual(1779975000, marker)
+
     def test_update_team_expand_progress_payload_sets_last_updated_at(self) -> None:
         payload = {
             "teamFlow": {
