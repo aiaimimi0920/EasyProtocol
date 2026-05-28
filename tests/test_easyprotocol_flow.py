@@ -616,6 +616,172 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual(["1"], driver.visible[0].sent[-1:])
         self.assertEqual(["4"], driver.visible[3].sent[-1:])
 
+    def test_browser_submit_phone_code_skips_non_interactable_visible_otp_inputs(self) -> None:
+        class _FakeElement:
+            def __init__(self, *, label: str, interactable: bool = True) -> None:
+                self.label = label
+                self.interactable = interactable
+                self.sent: list[str] = []
+
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            @property
+            def rect(self) -> dict[str, int]:
+                return {"width": 24, "height": 24}
+
+            def click(self) -> None:
+                if not self.interactable:
+                    raise RuntimeError(f"{self.label} not interactable")
+
+            def send_keys(self, *values: object) -> None:
+                if not self.interactable:
+                    raise RuntimeError(f"{self.label} not interactable")
+                self.sent.extend(str(value) for value in values)
+
+        class _FakeSwitch:
+            def default_content(self) -> None:
+                return None
+
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.switch_to = _FakeSwitch()
+                self.bad = _FakeElement(label="bad", interactable=False)
+                self.visible = [_FakeElement(label=f"digit-{index}") for index in range(4)]
+
+            def find_elements(self, by: object, selector: str) -> list[object]:
+                if selector == 'input[maxlength="1"], input[inputmode="numeric"], input[autocomplete="one-time-code"]':
+                    return [self.bad, *self.visible]
+                if selector == "button":
+                    return []
+                return []
+
+        driver = _FakeDriver()
+
+        self.assertTrue(protocol_register._browser_try_submit_phone_code(driver, sms_code="1234"))
+        self.assertEqual(["1"], driver.visible[0].sent[-1:])
+        self.assertEqual(["4"], driver.visible[3].sent[-1:])
+
+    def test_browser_submit_phone_code_skips_non_interactable_text_code_input(self) -> None:
+        class _FakeElement:
+            def __init__(self, *, label: str, interactable: bool = True) -> None:
+                self.label = label
+                self.interactable = interactable
+                self.sent: list[str] = []
+
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            @property
+            def rect(self) -> dict[str, int]:
+                return {"width": 120, "height": 24}
+
+            def click(self) -> None:
+                if not self.interactable:
+                    raise RuntimeError(f"{self.label} not interactable")
+
+            def send_keys(self, *values: object) -> None:
+                if not self.interactable:
+                    raise RuntimeError(f"{self.label} not interactable")
+                self.sent.extend(str(value) for value in values)
+
+        class _FakeSwitch:
+            def default_content(self) -> None:
+                return None
+
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.switch_to = _FakeSwitch()
+                self.bad = _FakeElement(label="bad", interactable=False)
+                self.good = _FakeElement(label="good")
+
+            def find_elements(self, by: object, selector: str) -> list[object]:
+                if selector == 'input[maxlength="1"], input[inputmode="numeric"], input[autocomplete="one-time-code"]':
+                    return []
+                if selector == 'input[name*="code"]':
+                    return [self.bad, self.good]
+                if selector == "button":
+                    return []
+                return []
+
+            def find_element(self, by: object, selector: str) -> object:
+                elements = self.find_elements(by, selector)
+                if not elements:
+                    raise RuntimeError(f"not found: {selector}")
+                return elements[0]
+
+        driver = _FakeDriver()
+
+        self.assertTrue(protocol_register._browser_try_submit_phone_code(driver, sms_code="1234"))
+        self.assertEqual(["1234"], driver.good.sent[-1:])
+
+    def test_browser_submit_phone_code_returns_false_when_submit_button_is_not_clickable(self) -> None:
+        class _FakeInput:
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            @property
+            def rect(self) -> dict[str, int]:
+                return {"width": 120, "height": 24}
+
+            def click(self) -> None:
+                return None
+
+            def send_keys(self, *values: object) -> None:
+                return None
+
+        class _FakeButton:
+            text = "Continue"
+
+            def is_displayed(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            @property
+            def rect(self) -> dict[str, int]:
+                return {"width": 80, "height": 24}
+
+            def click(self) -> None:
+                raise RuntimeError("button not interactable")
+
+        class _FakeSwitch:
+            def default_content(self) -> None:
+                return None
+
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.switch_to = _FakeSwitch()
+                self.text_input = _FakeInput()
+                self.button = _FakeButton()
+
+            def find_elements(self, by: object, selector: str) -> list[object]:
+                if selector == 'input[maxlength="1"], input[inputmode="numeric"], input[autocomplete="one-time-code"]':
+                    return []
+                if selector == 'input[name*="code"]':
+                    return [self.text_input]
+                if selector == "button":
+                    return [self.button]
+                return []
+
+            def find_element(self, by: object, selector: str) -> object:
+                elements = self.find_elements(by, selector)
+                if not elements:
+                    raise RuntimeError(f"not found: {selector}")
+                return elements[0]
+
+        self.assertFalse(protocol_register._browser_try_submit_phone_code(_FakeDriver(), sms_code="1234"))
+
     def test_submit_phone_number_for_resume_waits_for_phone_surface_before_failing(self) -> None:
         class _FakeDriver:
             def __init__(self) -> None:

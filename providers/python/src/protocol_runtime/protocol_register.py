@@ -3952,6 +3952,38 @@ def _browser_interactable_elements(elements: Any) -> list[Any]:
     return [element for element in elements if _browser_element_is_interactable(element)]
 
 
+def _browser_try_send_keys_to_input(element: Any, *, value: str, keys: Any) -> bool:
+    if not _browser_element_is_interactable(element):
+        return False
+    try:
+        element.click()
+    except Exception:
+        pass
+    try:
+        element.send_keys(keys.CONTROL, "a")
+    except Exception:
+        pass
+    try:
+        element.send_keys(str(value or ""))
+        return True
+    except Exception:
+        return False
+
+
+def _browser_find_candidate_elements(driver: Any, by: Any, selector: str) -> list[Any]:
+    try:
+        elements = list(driver.find_elements(by, selector) or [])
+    except Exception:
+        elements = []
+    if elements:
+        return elements
+    try:
+        element = driver.find_element(by, selector)
+    except Exception:
+        return []
+    return [element]
+
+
 def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
     try:
         from selenium.webdriver.common.by import By
@@ -3972,18 +4004,18 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
         )
     except Exception:
         single_inputs = []
-    usable_single_inputs = _browser_interactable_elements(single_inputs)[: len(code)]
+    usable_single_inputs = _browser_interactable_elements(single_inputs)
     if len(usable_single_inputs) >= len(code) and len(code) > 1:
-        for index, digit in enumerate(code):
-            try:
-                target = usable_single_inputs[index]
-                target.click()
-                target.send_keys(Keys.CONTROL, "a")
-                target.send_keys(digit)
-            except Exception:
-                return False
+        submitted_digits = 0
+        for target in usable_single_inputs:
+            if submitted_digits >= len(code):
+                break
+            digit = code[submitted_digits]
+            if _browser_try_send_keys_to_input(target, value=digit, keys=Keys):
+                submitted_digits += 1
+        if submitted_digits < len(code):
+            return False
     else:
-        text_input = None
         selectors = [
             'input[name*="code"]',
             'input[id*="code"]',
@@ -3991,80 +4023,45 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
             'input[inputmode="numeric"]',
             'input[type="text"]',
         ]
+        submitted_text = False
+        seen_inputs: set[int] = set()
         for selector in selectors:
-            try:
-                text_input = driver.find_element(By.CSS_SELECTOR, selector)
-                if _browser_element_is_interactable(text_input):
+            for text_input in _browser_find_candidate_elements(driver, By.CSS_SELECTOR, selector):
+                marker = id(text_input)
+                if marker in seen_inputs:
+                    continue
+                seen_inputs.add(marker)
+                if _browser_try_send_keys_to_input(text_input, value=code, keys=Keys):
+                    submitted_text = True
                     break
-            except Exception:
-                continue
-        if text_input is None:
+            if submitted_text:
+                break
+        if not submitted_text:
             return False
-        try:
-            text_input.click()
-        except Exception:
-            pass
-        try:
-            text_input.send_keys(Keys.CONTROL, "a")
-        except Exception:
-            pass
-        text_input.send_keys(code)
     submit_button = None
     labels = {"continue", "verify", "submit", "next", "继续", "验证", "提交", "下一步"}
     try:
-        for candidate in driver.find_elements(By.TAG_NAME, "button"):
-            if not _browser_element_is_interactable(candidate):
-                continue
-            text = str(getattr(candidate, "text", "") or "").strip().lower()
-            if text in labels:
-                submit_button = candidate
-                break
+        buttons = driver.find_elements(By.TAG_NAME, "button")
     except Exception:
-        submit_button = None
-    if submit_button is None:
+        buttons = []
+    matched_button = False
+    for candidate in buttons:
+        if not _browser_element_is_interactable(candidate):
+            continue
+        text = str(getattr(candidate, "text", "") or "").strip().lower()
+        if text not in labels:
+            continue
+        matched_button = True
+        submit_button = candidate
+        try:
+            submit_button.click()
+            return True
+        except Exception:
+            submit_button = None
+            continue
+    if submit_button is None and not matched_button:
         return True
-    try:
-        submit_button.click()
-        return True
-    except Exception:
-        return False
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-    try:
-        password_input = driver.find_element(
-            By.CSS_SELECTOR,
-            'input[type="password"], input[name="new-password"], input[name*="password"], input[id*="password"]',
-        )
-    except Exception:
-        return False
-    continue_button = None
-    try:
-        for candidate in driver.find_elements(By.TAG_NAME, "button"):
-            text = str(getattr(candidate, "text", "") or "").strip()
-            if text == "Continue":
-                continue_button = candidate
-                break
-    except Exception:
-        continue_button = None
-    if continue_button is None:
-        return False
-    try:
-        password_input.click()
-    except Exception:
-        pass
-    try:
-        password_input.send_keys(Keys.CONTROL, "a")
-    except Exception:
-        pass
-    password_input.send_keys(str(password or ""))
-    time.sleep(0.6)
-    try:
-        continue_button.click()
-        return True
-    except Exception:
-        return False
+    return False
 
 
 def _browser_recover_to_password_surface(
