@@ -3918,6 +3918,40 @@ def _browser_try_submit_phone_number(driver: Any, *, phone_number: str) -> bool:
         return False
 
 
+def _browser_element_is_interactable(element: Any) -> bool:
+    if element is None:
+        return False
+    try:
+        if hasattr(element, "is_displayed") and not bool(element.is_displayed()):
+            return False
+    except Exception:
+        return False
+    try:
+        if hasattr(element, "is_enabled") and not bool(element.is_enabled()):
+            return False
+    except Exception:
+        return False
+    try:
+        rect = getattr(element, "rect", None)
+        if isinstance(rect, dict):
+            width = float(rect.get("width") or 0)
+            height = float(rect.get("height") or 0)
+            if width <= 0 or height <= 0:
+                return False
+    except Exception:
+        return False
+    return True
+
+
+def _browser_interactable_elements(elements: Any) -> list[Any]:
+    if not isinstance(elements, list):
+        try:
+            elements = list(elements or [])
+        except Exception:
+            return []
+    return [element for element in elements if _browser_element_is_interactable(element)]
+
+
 def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
     try:
         from selenium.webdriver.common.by import By
@@ -3938,7 +3972,7 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
         )
     except Exception:
         single_inputs = []
-    usable_single_inputs = [item for item in single_inputs if item is not None][: len(code)]
+    usable_single_inputs = _browser_interactable_elements(single_inputs)[: len(code)]
     if len(usable_single_inputs) >= len(code) and len(code) > 1:
         for index, digit in enumerate(code):
             try:
@@ -3960,7 +3994,7 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
         for selector in selectors:
             try:
                 text_input = driver.find_element(By.CSS_SELECTOR, selector)
-                if text_input is not None:
+                if _browser_element_is_interactable(text_input):
                     break
             except Exception:
                 continue
@@ -3979,6 +4013,8 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
     labels = {"continue", "verify", "submit", "next", "继续", "验证", "提交", "下一步"}
     try:
         for candidate in driver.find_elements(By.TAG_NAME, "button"):
+            if not _browser_element_is_interactable(candidate):
+                continue
             text = str(getattr(candidate, "text", "") or "").strip().lower()
             if text in labels:
                 submit_button = candidate

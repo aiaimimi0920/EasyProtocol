@@ -552,6 +552,55 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("user@example.com", result["email"])
         self.assertEqual("user_123", result["auth"]["user_id"])
 
+    def test_browser_submit_phone_code_skips_hidden_otp_inputs(self) -> None:
+        class _FakeElement:
+            def __init__(self, *, displayed: bool, label: str) -> None:
+                self.displayed = displayed
+                self.label = label
+                self.sent: list[str] = []
+
+            def is_displayed(self) -> bool:
+                return self.displayed
+
+            def is_enabled(self) -> bool:
+                return True
+
+            @property
+            def rect(self) -> dict[str, int]:
+                return {"width": 24 if self.displayed else 0, "height": 24 if self.displayed else 0}
+
+            def click(self) -> None:
+                if not self.displayed:
+                    raise RuntimeError(f"{self.label} hidden")
+
+            def send_keys(self, *values: object) -> None:
+                if not self.displayed:
+                    raise RuntimeError(f"{self.label} hidden")
+                self.sent.extend(str(value) for value in values)
+
+        class _FakeSwitch:
+            def default_content(self) -> None:
+                return None
+
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.switch_to = _FakeSwitch()
+                self.hidden = _FakeElement(displayed=False, label="hidden")
+                self.visible = [_FakeElement(displayed=True, label=f"digit-{index}") for index in range(4)]
+
+            def find_elements(self, by: object, selector: str) -> list[object]:
+                if selector == 'input[maxlength="1"], input[inputmode="numeric"], input[autocomplete="one-time-code"]':
+                    return [self.hidden, *self.visible]
+                if selector == "button":
+                    return []
+                return []
+
+        driver = _FakeDriver()
+
+        self.assertTrue(protocol_register._browser_try_submit_phone_code(driver, sms_code="1234"))
+        self.assertEqual(["1"], driver.visible[0].sent[-1:])
+        self.assertEqual(["4"], driver.visible[3].sent[-1:])
+
     def test_submit_phone_number_for_resume_waits_for_phone_surface_before_failing(self) -> None:
         class _FakeDriver:
             def __init__(self) -> None:
