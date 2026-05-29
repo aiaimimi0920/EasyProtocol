@@ -143,6 +143,42 @@ def _chatgpt_login_step_retryable(exc: BaseException) -> bool:
     )
 
 
+def _merge_chatgpt_login_details(
+    *,
+    seed_payload: dict[str, Any],
+    account_entries: list[dict[str, Any]],
+    client_bootstrap: dict[str, Any],
+    page_type: str,
+    network_attempt: int,
+) -> dict[str, Any]:
+    existing_details = (
+        seed_payload.get("chatgptLoginDetails") if isinstance(seed_payload.get("chatgptLoginDetails"), dict) else {}
+    )
+    details: dict[str, Any] = {
+        "accounts": account_entries,
+        "clientBootstrap": client_bootstrap,
+        "pageType": page_type,
+        "networkAttempt": network_attempt,
+    }
+    for key in (
+        "oauthTokens",
+        "refreshToken",
+        "refresh_token",
+        "idToken",
+        "id_token",
+        "accessToken",
+        "access_token",
+        "expiresAt",
+        "expires_at",
+        "oauthClientId",
+        "oauthTokenEndpoint",
+        "refreshStrategy",
+    ):
+        if key in existing_details and key not in details:
+            details[key] = existing_details[key]
+    return details
+
+
 def _normalize_seed_login_context(
     seed_payload: dict[str, Any],
     *,
@@ -739,9 +775,10 @@ def run_protocol_chatgpt_login_init_from_path(
             updated_payload["mailboxAccessKey"] = mailbox_ref_value
             updated_payload["mailboxSessionId"] = mailbox_session_id_value
             updated_payload["chatgptLogin"] = result
-            updated_payload["chatgptLoginDetails"] = {
-                "accounts": account_entries,
-                "clientBootstrap": {
+            updated_payload["chatgptLoginDetails"] = _merge_chatgpt_login_details(
+                seed_payload=seed_payload,
+                account_entries=account_entries,
+                client_bootstrap={
                     "authStatus": bootstrap_auth_status,
                     "accountId": bootstrap_account_id,
                     "planType": bootstrap_plan_type,
@@ -751,9 +788,9 @@ def run_protocol_chatgpt_login_init_from_path(
                     "userId": str(bootstrap_user.get("id") or "").strip(),
                     "email": str(bootstrap_user.get("email") or "").strip(),
                 },
-                "pageType": _extract_page_type(oauth_entry_response) or "",
-                "networkAttempt": network_attempt,
-            }
+                page_type=_extract_page_type(oauth_entry_response) or "",
+                network_attempt=network_attempt,
+            )
             seed_path.write_text(json.dumps(updated_payload, indent=2, ensure_ascii=False), encoding="utf-8")
             return result
         except Exception as exc:

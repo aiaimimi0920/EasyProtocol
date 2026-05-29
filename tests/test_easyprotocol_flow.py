@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import json
 import sys
 import os
 import tempfile
@@ -24,6 +25,7 @@ from new_protocol_register import easyprotocol_flow  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
 from new_protocol_register import protocol_chatgpt_login  # noqa: E402
 from new_protocol_register import protocol_oauth  # noqa: E402
+from new_protocol_register import protocol_platform_org  # noqa: E402
 from new_protocol_register import protocol_phone_verification  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.others import runtime as protocol_runtime  # noqa: E402
@@ -215,6 +217,131 @@ class EasyProtocolFlowTests(unittest.TestCase):
         payload = protocol_chatgpt_login._extract_chatgpt_client_bootstrap(html)
         self.assertEqual("logged_in", payload.get("authStatus"))
         self.assertEqual("tok_demo", (payload.get("session") or {}).get("accessToken"))
+
+    def test_platform_org_init_persists_oauth_refresh_material_without_returning_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            seed_path = Path(tmp_dir) / "small-success.json"
+            seed_path.write_text(
+                json.dumps(
+                    {
+                        "email": "user@example.com",
+                        "mailboxRef": "mailbox-ref",
+                        "mailboxSessionId": "mailbox-session",
+                        "finalUrl": "https://platform.openai.com/auth/callback?code=code_123&state=state_123",
+                        "platformAuth": {
+                            "codeVerifier": "verifier_123",
+                            "state": "state_123",
+                            "deviceId": "device_123",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def request_side_effect(*_args: object, **kwargs: object) -> SimpleNamespace:
+                request_label = str(kwargs.get("request_label") or "")
+                if request_label == "platform-oauth-token":
+                    return SimpleNamespace(
+                        status_code=200,
+                        json=lambda: {
+                            "access_token": "access.demo",
+                            "refresh_token": "refresh.demo",
+                            "id_token": "id.demo",
+                            "expires_in": 3600,
+                            "token_type": "Bearer",
+                        },
+                    )
+                if request_label == "platform-onboarding-login":
+                    return SimpleNamespace(
+                        status_code=200,
+                        json=lambda: {
+                            "user": {
+                                "id": "user_123",
+                                "session": {"sensitive_id": "session_token_123"},
+                                "orgs": {
+                                    "data": [
+                                        {
+                                            "id": "org_123",
+                                            "title": "personal",
+                                            "name": "personal",
+                                            "settings": {"completed_platform_onboarding": False},
+                                            "projects": {"data": [{"id": "proj_123", "title": "Default"}]},
+                                        }
+                                    ]
+                                },
+                            }
+                        },
+                    )
+                if request_label in {"platform-organization-update", "platform-organization-user-update"}:
+                    return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+                raise AssertionError(f"unexpected request label: {request_label}")
+
+            with mock.patch.object(protocol_platform_org, "flow_network_env", return_value=contextlib.nullcontext()), mock.patch.object(
+                protocol_platform_org,
+                "_session_request",
+                side_effect=request_side_effect,
+            ), mock.patch.object(
+                protocol_platform_org,
+                "_build_platform_headers",
+                return_value={},
+            ), mock.patch.object(protocol_platform_org, "_best_effort_warm_platform_permissions"):
+                result = protocol_platform_org.run_protocol_platform_organization_init_from_path(
+                    source_path=seed_path,
+                    explicit_proxy="http://proxy:8080",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("completed", result["status"])
+            self.assertNotIn("refreshToken", result)
+            self.assertNotIn("refresh_token", result)
+
+            persisted = json.loads(seed_path.read_text(encoding="utf-8"))
+            self.assertEqual("access.demo", persisted["accessToken"])
+            self.assertEqual("refresh.demo", persisted["refreshToken"])
+            self.assertEqual("id.demo", persisted["idToken"])
+            self.assertTrue(str(persisted["expiresAt"]).endswith("Z"))
+            self.assertEqual(protocol_platform_org._PLATFORM_AUTH0_CLIENT_ID, persisted["oauthClientId"])
+            self.assertEqual(protocol_platform_org._PLATFORM_AUTH0_TOKEN_URL, persisted["oauthTokenEndpoint"])
+            self.assertEqual("oauth_token", persisted["refreshStrategy"])
+            oauth_tokens = persisted["chatgptLoginDetails"]["oauthTokens"]
+            self.assertEqual("access.demo", oauth_tokens["access_token"])
+            self.assertEqual("refresh.demo", oauth_tokens["refresh_token"])
+            self.assertEqual("id.demo", oauth_tokens["id_token"])
+            self.assertEqual(3600, oauth_tokens["expires_in"])
+            self.assertEqual("Bearer", oauth_tokens["token_type"])
+            self.assertTrue(str(oauth_tokens["exchanged_at"]).endswith("Z"))
+
+    def test_chatgpt_login_details_merge_preserves_existing_oauth_tokens(self) -> None:
+        details = protocol_chatgpt_login._merge_chatgpt_login_details(
+            seed_payload={
+                "chatgptLoginDetails": {
+                    "oauthTokens": {
+                        "access_token": "access.demo",
+                        "refresh_token": "refresh.demo",
+                        "id_token": "id.demo",
+                    }
+                }
+            },
+            account_entries=[{"id": "acct_1"}],
+            client_bootstrap={
+                "authStatus": "logged_in",
+                "accountId": "acct_1",
+                "planType": "free",
+                "structure": "personal",
+                "accessTokenPresent": True,
+                "accessToken": "bootstrap.demo",
+                "userId": "user_1",
+                "email": "user@example.com",
+            },
+            page_type="chatgpt_logged_in",
+            network_attempt=2,
+        )
+
+        self.assertEqual("refresh.demo", details["oauthTokens"]["refresh_token"])
+        self.assertEqual("bootstrap.demo", details["clientBootstrap"]["accessToken"])
+        self.assertEqual([{"id": "acct_1"}], details["accounts"])
+        self.assertEqual("chatgpt_logged_in", details["pageType"])
+        self.assertEqual(2, details["networkAttempt"])
 
     def test_obtain_team_mother_oauth_force_email_auth_skips_refresh(self) -> None:
         with mock.patch.object(

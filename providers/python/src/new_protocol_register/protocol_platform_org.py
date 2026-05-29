@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import urllib.parse
@@ -102,6 +103,148 @@ def _decode_jwt_without_verify(token: str) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _utc_timestamp_z(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_oauth_expires_at(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000
+        try:
+            return _utc_timestamp_z(datetime.fromtimestamp(timestamp, tz=timezone.utc))
+        except Exception:
+            return ""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        timestamp = float(raw)
+    except ValueError:
+        timestamp = None
+    if timestamp is not None:
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000
+        try:
+            return _utc_timestamp_z(datetime.fromtimestamp(timestamp, tz=timezone.utc))
+        except Exception:
+            return raw
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return _utc_timestamp_z(parsed)
+
+
+def _coerce_expires_in_seconds(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds > 0 else None
+
+
+def _resolve_oauth_expires_at(
+    *,
+    token_payload: dict[str, Any],
+    access_token: str,
+    exchanged_at: datetime,
+) -> str:
+    explicit_expires_at = _normalize_oauth_expires_at(
+        token_payload.get("expires_at") or token_payload.get("expiresAt")
+    )
+    if explicit_expires_at:
+        return explicit_expires_at
+    expires_in = _coerce_expires_in_seconds(token_payload.get("expires_in") or token_payload.get("expiresIn"))
+    if expires_in is not None:
+        return _utc_timestamp_z(exchanged_at + timedelta(seconds=expires_in))
+    access_claims = _decode_jwt_without_verify(access_token)
+    return _normalize_oauth_expires_at(access_claims.get("exp"))
+
+
+def _build_platform_oauth_material(
+    *,
+    token_payload: dict[str, Any],
+    access_token: str,
+    exchanged_at: datetime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    exchanged_at_text = _utc_timestamp_z(exchanged_at)
+    refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    id_token = str(token_payload.get("id_token") or "").strip()
+    expires_at = _resolve_oauth_expires_at(
+        token_payload=token_payload,
+        access_token=access_token,
+        exchanged_at=exchanged_at,
+    )
+
+    top_level: dict[str, Any] = {
+        "accessToken": access_token,
+        "oauthClientId": _PLATFORM_AUTH0_CLIENT_ID,
+        "oauthTokenEndpoint": _PLATFORM_AUTH0_TOKEN_URL,
+    }
+    if refresh_token:
+        top_level["refreshToken"] = refresh_token
+        top_level["refreshStrategy"] = "oauth_token"
+    if id_token:
+        top_level["idToken"] = id_token
+    if expires_at:
+        top_level["expiresAt"] = expires_at
+
+    oauth_tokens: dict[str, Any] = {
+        "access_token": access_token,
+        "exchanged_at": exchanged_at_text,
+    }
+    for key in ("refresh_token", "id_token", "expires_in", "token_type", "expires_at"):
+        if key not in token_payload:
+            continue
+        value = token_payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        oauth_tokens[key] = value
+    return top_level, oauth_tokens
+
+
+def _merge_platform_oauth_material(
+    *,
+    seed_payload: dict[str, Any],
+    token_payload: dict[str, Any],
+    access_token: str,
+    exchanged_at: datetime,
+) -> dict[str, Any]:
+    top_level, oauth_tokens = _build_platform_oauth_material(
+        token_payload=token_payload,
+        access_token=access_token,
+        exchanged_at=exchanged_at,
+    )
+    updated_payload = dict(seed_payload)
+    updated_payload.update(top_level)
+    existing_login_details = (
+        updated_payload.get("chatgptLoginDetails")
+        if isinstance(updated_payload.get("chatgptLoginDetails"), dict)
+        else {}
+    )
+    merged_login_details = dict(existing_login_details)
+    existing_oauth_tokens = (
+        merged_login_details.get("oauthTokens") if isinstance(merged_login_details.get("oauthTokens"), dict) else {}
+    )
+    merged_oauth_tokens = dict(existing_oauth_tokens)
+    merged_oauth_tokens.update(oauth_tokens)
+    merged_login_details["oauthTokens"] = merged_oauth_tokens
+    updated_payload["chatgptLoginDetails"] = merged_login_details
+    return updated_payload
 
 
 def _select_default_org(orgs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -325,6 +468,7 @@ def run_protocol_platform_organization_init_from_path(
             token_payload = token_response.json() if hasattr(token_response, "json") else {}
             if not isinstance(token_payload, dict):
                 raise RuntimeError("platform_oauth_token_payload_invalid")
+            token_exchanged_at = datetime.now(timezone.utc)
             access_token = str(token_payload.get("access_token") or "").strip()
             if not access_token:
                 raise RuntimeError("platform_oauth_access_token_missing")
@@ -441,9 +585,22 @@ def run_protocol_platform_organization_init_from_path(
             "developerPersona": str(developer_persona or "").strip() or "student",
             "completedPlatformOnboarding": bool(context.get("completedPlatformOnboarding")),
             "oauthClientId": _PLATFORM_AUTH0_CLIENT_ID,
+            "oauthTokenCaptured": True,
+            "refreshTokenCaptured": bool(str(token_payload.get("refresh_token") or "").strip()),
+            "idTokenCaptured": bool(str(token_payload.get("id_token") or "").strip()),
+            "oauthExpiresAt": _resolve_oauth_expires_at(
+                token_payload=token_payload,
+                access_token=access_token,
+                exchanged_at=token_exchanged_at,
+            ),
             "sourcePath": str(seed_path),
         }
-        updated_payload = dict(seed_payload)
+        updated_payload = _merge_platform_oauth_material(
+            seed_payload=seed_payload,
+            token_payload=token_payload,
+            access_token=access_token,
+            exchanged_at=token_exchanged_at,
+        )
         updated_payload["platformOrganization"] = platform_state
         updated_payload["platformOrganizationDetails"] = {
             "onboardingLogin": onboarding_login_payload,
