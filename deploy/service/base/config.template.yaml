@@ -54,6 +54,14 @@ persistence:
   audit_history_limit: 500
   snapshot_limit: 200
 
+provider_pool:
+  providers:
+    python:
+      warm_replicas: 5
+      max_replicas: 20
+      idle_scale_down_seconds: 120s
+      acquire_timeout: 180s
+
 services:
   - name: PythonProtocol-001
     language: python

@@ -166,10 +166,10 @@ func DefaultConfig() Config {
 		ProviderPool: ProviderPoolConfig{
 			Providers: map[string]ProviderPoolProviderConfig{
 				"python": {
-					WarmReplicas:         1,
-					MaxReplicas:          4,
+					WarmReplicas:         5,
+					MaxReplicas:          20,
 					IdleScaleDownSeconds: 120 * time.Second,
-					AcquireTimeout:       30 * time.Second,
+					AcquireTimeout:       180 * time.Second,
 				},
 			},
 		},

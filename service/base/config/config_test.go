@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadUsesYamlOverridesAndKeepsDefaults(t *testing.T) {
@@ -69,5 +70,24 @@ func TestLoadEmptyPathFallsBackToDefaultConfig(t *testing.T) {
 	}
 	if len(cfg.Services) == 0 {
 		t.Fatalf("expected default services to be present")
+	}
+}
+
+func TestDefaultPythonProviderPoolCoversRegisterConcurrency(t *testing.T) {
+	t.Parallel()
+
+	cfg := DefaultConfig()
+	pythonPool, ok := cfg.ProviderPool.Providers["python"]
+	if !ok {
+		t.Fatalf("expected default python provider pool")
+	}
+	if pythonPool.WarmReplicas < 5 {
+		t.Fatalf("expected at least 5 warm python replicas for EasyRegister main concurrency, got %d", pythonPool.WarmReplicas)
+	}
+	if pythonPool.MaxReplicas < 20 {
+		t.Fatalf("expected at least 20 max python replicas for burst registration retries, got %d", pythonPool.MaxReplicas)
+	}
+	if pythonPool.AcquireTimeout < 180*time.Second {
+		t.Fatalf("expected python acquire timeout >= 180s, got %s", pythonPool.AcquireTimeout)
 	}
 }

@@ -14,10 +14,10 @@ serviceBase:
     provider_pool:
       providers:
         python:
-          warm_replicas: 1
-          max_replicas: 4
+          warm_replicas: 5
+          max_replicas: 20
           idle_scale_down_seconds: 120s
-          acquire_timeout: 30s
+          acquire_timeout: 180s
         go:
           warm_replicas: 0
         javascript:
