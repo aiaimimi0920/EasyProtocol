@@ -633,13 +633,13 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("https://auth.openai.com/sms-verification", result["resumeContext"]["continueUrl"])
         self.assertEqual(1, len(result["resumeContext"]["sessionCookies"]))
 
-    def test_submit_phone_verification_code_for_resume_can_finish_callback_url(self) -> None:
+    def test_submit_phone_verification_code_for_resume_can_finish_matching_callback_url(self) -> None:
         class _FakeDriver:
             def __init__(self) -> None:
-                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+                self.current_url = "http://localhost:1455/auth/callback?code=abc&state=state_123"
 
             def get(self, url: str) -> None:
-                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+                self.current_url = "http://localhost:1455/auth/callback?code=abc&state=state_123"
 
             def quit(self) -> None:
                 return None
@@ -667,7 +667,10 @@ class EasyProtocolFlowTests(unittest.TestCase):
                 email="user@example.com",
                 auth={"user_id": "user_123"},
             ),
-        ):
+        ) as callback_result_from_url, mock.patch.object(
+            protocol_register,
+            "_continue_authenticated_codex_oauth",
+        ) as continue_authenticated_codex_oauth:
             result = protocol_register.submit_phone_verification_code_for_resume(
                 source_payload={
                     "email": "user@example.com",
@@ -681,10 +684,10 @@ class EasyProtocolFlowTests(unittest.TestCase):
                     "continueUrl": "https://auth.openai.com/sms-verification",
                     "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
                     "oauth": {
-                        "authUrl": "https://auth.openai.com/api/accounts/authorize?x=1",
+                        "authUrl": "https://auth.openai.com/oauth/authorize?x=1",
                         "state": "state_123",
                         "codeVerifier": "verifier_123",
-                        "redirectUri": "https://chatgpt.com/api/auth/callback/openai",
+                        "redirectUri": "http://localhost:1455/auth/callback",
                     },
                 },
                 sms_code="123456",
@@ -693,6 +696,91 @@ class EasyProtocolFlowTests(unittest.TestCase):
 
         self.assertEqual("user@example.com", result["email"])
         self.assertEqual("user_123", result["auth"]["user_id"])
+        callback_result_from_url.assert_called_once()
+        continue_authenticated_codex_oauth.assert_not_called()
+
+    def test_submit_phone_verification_code_replays_codex_oauth_after_chatgpt_web_callback(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+
+            def get(self, url: str) -> None:
+                self.current_url = "https://chatgpt.com/api/auth/callback/openai?code=abc&state=state_123"
+
+            def quit(self) -> None:
+                return None
+
+        completed = protocol_register.ProtocolRegistrationResult(
+            email="user@example.com",
+            auth={
+                "account_id": "acct_codex",
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "acct_codex",
+                    "chatgpt_plan_type": "free",
+                    "organizations": [{"title": "personal", "role": "owner"}],
+                },
+            },
+        )
+        chatgpt_web_result = protocol_register.ProtocolRegistrationResult(
+            email="user@example.com",
+            auth={
+                "account_id": "acct_web",
+                "https://api.openai.com/auth": {"user_id": "user_web"},
+            },
+        )
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (_FakeDriver(), None),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_code",
+            return_value=True,
+        ), mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=chatgpt_web_result,
+        ) as callback_result_from_url, mock.patch.object(
+            protocol_register,
+            "_continue_authenticated_codex_oauth",
+            return_value=completed,
+        ) as continue_authenticated_codex_oauth:
+            result = protocol_register.submit_phone_verification_code_for_resume(
+                source_payload={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailboxRef": "mailtm:test",
+                    "firstName": "User",
+                    "lastName": "Example",
+                    "birthdate": "2000-01-01",
+                },
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/sms-verification",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/oauth/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "http://localhost:1455/auth/callback",
+                    },
+                },
+                sms_code="123456",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual("acct_codex", result["accountId"])
+        self.assertEqual("free", result["auth"]["https://api.openai.com/auth"]["chatgpt_plan_type"])
+        callback_result_from_url.assert_not_called()
+        continue_authenticated_codex_oauth.assert_called_once()
 
     def test_browser_submit_phone_code_skips_hidden_otp_inputs(self) -> None:
         class _FakeElement:

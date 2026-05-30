@@ -5617,6 +5617,32 @@ def _is_callback_url(url: str) -> bool:
     return bool(normalized) and "code=" in normalized and "state=" in normalized
 
 
+def _callback_matches_redirect_uri(*, callback_url: str, redirect_uri: str) -> bool:
+    callback = str(callback_url or "").strip()
+    redirect = str(redirect_uri or "").strip()
+    if not callback or not redirect or not _is_callback_url(callback):
+        return False
+    try:
+        callback_parts = urllib.parse.urlsplit(callback)
+        redirect_parts = urllib.parse.urlsplit(redirect)
+    except Exception:
+        return False
+    if not callback_parts.scheme or not callback_parts.netloc:
+        return False
+    if not redirect_parts.scheme or not redirect_parts.netloc:
+        return False
+
+    def _normalized_path(value: str) -> str:
+        normalized = str(value or "/").strip() or "/"
+        return normalized.rstrip("/") or "/"
+
+    return (
+        callback_parts.scheme.lower() == redirect_parts.scheme.lower()
+        and callback_parts.netloc.lower() == redirect_parts.netloc.lower()
+        and _normalized_path(callback_parts.path) == _normalized_path(redirect_parts.path)
+    )
+
+
 def _html_attrs(raw_attrs: str) -> dict[str, str]:
     attrs: dict[str, str] = {}
     for match in _ATTR_RE.finditer(str(raw_attrs or "")):
@@ -6296,7 +6322,10 @@ def submit_phone_verification_code_for_resume(
         time.sleep(2.0)
         _import_browser_driver_cookies_into_session(session, driver=driver)
         current_url = str(getattr(driver, "current_url", "") or "").strip()
-        if current_url and _is_callback_url(current_url):
+        if current_url and _callback_matches_redirect_uri(
+            callback_url=current_url,
+            redirect_uri=str(oauth.redirect_uri or ""),
+        ):
             callback_result = _callback_result_from_url(
                 callback_url=current_url,
                 oauth=oauth,
@@ -6313,12 +6342,13 @@ def submit_phone_verification_code_for_resume(
                 last_name=str(source_payload.get("lastName") or source_payload.get("last_name") or "").strip(),
                 birthdate=str(source_payload.get("birthdate") or "").strip(),
             )
+            auth_payload = dict(callback_result.auth or {})
             return {
-                "auth": dict(callback_result.auth or {}),
+                "auth": auth_payload,
                 "email": str(callback_result.email or "").strip(),
                 "accountId": str(
-                    dict(callback_result.auth or {}).get("account_id")
-                    or dict((dict(callback_result.auth or {}).get("https://api.openai.com/auth") or {})).get("account_id")
+                    auth_payload.get("account_id")
+                    or dict((auth_payload.get("https://api.openai.com/auth") or {})).get("account_id")
                     or ""
                 ).strip(),
                 "successPath": str(
@@ -6330,6 +6360,12 @@ def submit_phone_verification_code_for_resume(
                 "smsCodeUsed": str(sms_code or "").strip(),
                 "resumeContext": dict(resume_context or {}),
             }
+        if current_url and _is_callback_url(current_url):
+            print(
+                "[python-protocol-service] phone verification ignored mismatched callback "
+                f"current={_format_logged_url(current_url)} "
+                f"redirect={_format_logged_url(str(oauth.redirect_uri or ''))}"
+            )
         completed = _continue_authenticated_codex_oauth(
             session=session,
             oauth=oauth,
