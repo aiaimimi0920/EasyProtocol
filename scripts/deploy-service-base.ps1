@@ -6,6 +6,11 @@ param(
     [string]$Image = '',
     [string]$ReleaseTag = '',
     [string]$GhcrOwner = '',
+    [string]$ProviderImage = '',
+    [string]$ProviderReleaseTag = '',
+    [string]$RegisterOutputDirHost = '',
+    [string]$RegisterTeamAuthDirHost = '',
+    [string]$RegisterTeamLocalDirHost = '',
     [string]$ServiceOutput = 'deploy/service/base/config/config.yaml',
     [string]$ServiceEnvOutput = 'deploy/service/base/config/runtime.env',
     [switch]$SkipPull
@@ -26,24 +31,36 @@ $config = Read-EasyProtocolConfig -ConfigPath $ConfigPath
 $stack = if ($config.stack) { $config.stack.easyProtocol } else { $null }
 $publishing = $config.publishing
 $ghcr = if ($null -ne $publishing) { $publishing.ghcr } else { $null }
-$configuredImage = if ($config.serviceBase -and $config.serviceBase.image) { [string]$config.serviceBase.image } else { 'easy-protocol/easy-protocol:local' }
-$configuredName = [string]($configuredImage -replace '^.+/', '' -replace ':.+$', '')
-$serviceImageName = if ([string]::IsNullOrWhiteSpace($configuredName)) { 'easy-protocol' } else { $configuredName }
+$serviceImageName = 'easy-protocol-service'
 $registry = if ($ghcr -and $ghcr.registry) { [string]$ghcr.registry } else { 'ghcr.io' }
 $networkName = if ($stack -and $stack.networkName) { [string]$stack.networkName } else { 'EasyAiMi' }
 $composeFile = Join-Path $repoRoot 'deploy/service/base/docker-compose.yaml'
 $renderedConfigPath = if ([System.IO.Path]::IsPathRooted($ServiceOutput)) { $ServiceOutput } else { Join-Path $repoRoot $ServiceOutput }
 $renderedRuntimeEnvPath = if ([System.IO.Path]::IsPathRooted($ServiceEnvOutput)) { $ServiceEnvOutput } else { Join-Path $repoRoot $ServiceEnvOutput }
 $useGhcrDeploy = $FromGhcr -or -not [string]::IsNullOrWhiteSpace($Image) -or -not [string]::IsNullOrWhiteSpace($ReleaseTag)
+$resolvedProviderImage = $ProviderImage
+if ([string]::IsNullOrWhiteSpace($resolvedProviderImage) -and -not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
+    $providerOwner = $GhcrOwner
+    if ([string]::IsNullOrWhiteSpace($providerOwner)) {
+        $providerOwner = if ($ghcr -and $ghcr.owner) { [string]$ghcr.owner } else { '' }
+    }
+    Assert-EasyProtocolGhcrOwnerReady -Owner $providerOwner -SourceDescription 'GHCR owner'
+    $resolvedProviderImage = "$registry/$providerOwner/easy-protocol-python:$ProviderReleaseTag"
+}
 
 if (-not $SkipRender) {
     Write-Host 'Rendering service/base config...' -ForegroundColor Cyan
-    Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $repoRoot 'scripts/render-derived-configs.ps1') -Arguments @(
+    $renderArgs = @(
         '-ConfigPath', $ConfigPath,
         '-ServiceBase',
         '-ServiceOutput', $ServiceOutput,
         '-ServiceEnvOutput', $ServiceEnvOutput
-    ) -FailureMessage 'render-derived-configs.ps1 failed'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $renderArgs += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $renderArgs += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $renderArgs += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage)) { $renderArgs += @('-PythonProviderImage', $resolvedProviderImage) }
+    Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $repoRoot 'scripts/render-derived-configs.ps1') -Arguments $renderArgs -FailureMessage 'render-derived-configs.ps1 failed'
 }
 
 if (-not (Test-Path -LiteralPath $renderedConfigPath)) {

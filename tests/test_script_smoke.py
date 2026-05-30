@@ -50,6 +50,14 @@ class ScriptSmokeTests(unittest.TestCase):
                     "smoke-release",
                     "-SkipRender",
                     "-SkipPull",
+                    "-RegisterOutputDirHost",
+                    "C:/runtime/register-output",
+                    "-RegisterTeamAuthDirHost",
+                    "C:/runtime/team-auth",
+                    "-RegisterTeamLocalDirHost",
+                    "C:/runtime/team-local",
+                    "-ProviderReleaseTag",
+                    "providers-smoke",
                 ],
                 env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
             )
@@ -65,6 +73,14 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("smoke-release", args)
             self.assertIn("-SkipRender", args)
             self.assertIn("-SkipPull", args)
+            self.assertIn("-RegisterOutputDirHost", args)
+            self.assertIn("C:/runtime/register-output", args)
+            self.assertIn("-RegisterTeamAuthDirHost", args)
+            self.assertIn("C:/runtime/team-auth", args)
+            self.assertIn("-RegisterTeamLocalDirHost", args)
+            self.assertIn("C:/runtime/team-local", args)
+            self.assertIn("-ProviderReleaseTag", args)
+            self.assertIn("providers-smoke", args)
 
     def test_deploy_service_base_dispatches_deploy_ghcr_helper(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -104,7 +120,7 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertTrue(record["FilePath"].lower().endswith("deploy-ghcr-easy-protocol-service.ps1"))
             args = record["Arguments"]
             self.assertIn("-Image", args)
-            self.assertIn("ghcr.io/test-owner/easy-protocol:smoke-release", args)
+            self.assertIn("ghcr.io/test-owner/easy-protocol-service:smoke-release", args)
             self.assertIn("-ConfigPath", args)
             self.assertIn(str(rendered_config), args)
             self.assertIn("-RuntimeEnvPath", args)
@@ -212,6 +228,51 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertEqual(endpoints.get("GolangProtocol-001"), "http://easy-protocol-go-001:9100")
             self.assertEqual(endpoints.get("JSProtocol-001"), "http://easy-protocol-javascript-001:9100")
             self.assertEqual(endpoints.get("RustProtocol-001"), "http://easy-protocol-rust-001:9100")
+
+    def test_render_derived_configs_can_override_python_provider_mounts_and_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root_config = Path(temp_dir) / "config.yaml"
+            temp_service_output = Path(temp_dir) / "service-config.yaml"
+            temp_runtime_env = Path(temp_dir) / "runtime.env"
+            payload = yaml.safe_load((REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+            temp_root_config.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(REPO_ROOT / "scripts" / "render-derived-configs.ps1"),
+                    "-ServiceBase",
+                    "-ConfigPath",
+                    str(temp_root_config),
+                    "-ServiceOutput",
+                    str(temp_service_output),
+                    "-ServiceEnvOutput",
+                    str(temp_runtime_env),
+                    "-RegisterOutputDirHost",
+                    "C:/runtime/register-output",
+                    "-RegisterTeamAuthDirHost",
+                    "C:/runtime/team-auth",
+                    "-RegisterTeamLocalDirHost",
+                    "C:/runtime/team-local",
+                    "-PythonProviderImage",
+                    "ghcr.io/test/easy-protocol-python:providers-smoke",
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            rendered = yaml.safe_load(temp_service_output.read_text(encoding="utf-8"))
+            python_runtime = rendered["managed_provider_runtime"]["providers"]["python"]
+            self.assertEqual("ghcr.io/test/easy-protocol-python:providers-smoke", python_runtime["image"])
+            mounts = {item["target"]: item for item in python_runtime["host_mounts"]}
+            self.assertEqual(
+                "/run/desktop/mnt/host/c/runtime/register-output",
+                mounts["/shared/register-output"]["source"],
+            )
+            self.assertFalse(mounts["/shared/register-output"]["read_only"])
+            self.assertEqual("/run/desktop/mnt/host/c/runtime/team-auth", mounts["/shared/team-auth"]["source"])
+            self.assertTrue(mounts["/shared/team-auth"]["read_only"])
+            self.assertEqual("/run/desktop/mnt/host/c/runtime/team-local", mounts["/shared/local-team-store"]["source"])
+            self.assertFalse(mounts["/shared/local-team-store"]["read_only"])
 
     def test_isolated_instance_deploy_uses_single_easy_protocol_compose_project(self):
         content = (REPO_ROOT / "scripts" / "deploy-isolated-easyprotocol-instance.ps1").read_text(encoding="utf-8")

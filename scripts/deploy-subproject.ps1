@@ -117,6 +117,11 @@ switch ($Project) {
         $args = @('-ConfigPath', $resolvedConfigPath)
         if ($NoBuild) { $args += '-NoBuild' }
         if ($SkipRender) { $args += '-SkipRender' }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
         Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-service-base.ps1') -Arguments $args -FailureMessage 'deploy-service-base.ps1 failed'
         break
     }
@@ -126,6 +131,11 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) { $args += @('-ReleaseTag', $ReleaseTag) }
         if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @('-GhcrOwner', $GhcrOwner) }
         if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @('-Image', $Image) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
+        if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
         if ($SkipPull) { $args += '-SkipPull' }
         Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-service-base.ps1') -Arguments $args -FailureMessage 'deploy-service-base.ps1 failed'
         break

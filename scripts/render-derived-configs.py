@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import re
 from pathlib import Path
 from typing import Any
 
@@ -198,6 +199,7 @@ def _build_managed_provider_host_mounts(provider_key: str, provider: dict[str, A
         source = str(host_mounts.get(source_key) or "").strip()
         if not source:
             continue
+        source = _normalize_docker_daemon_host_path(source)
         mounts.append(
             {
                 "source": source,
@@ -206,6 +208,16 @@ def _build_managed_provider_host_mounts(provider_key: str, provider: dict[str, A
             }
         )
     return mounts
+
+
+def _normalize_docker_daemon_host_path(path_text: str) -> str:
+    normalized = str(path_text or "").strip()
+    match = re.match(r"^([A-Za-z]):[\\/](.*)$", normalized)
+    if not match:
+        return normalized
+    drive = match.group(1).lower()
+    tail = match.group(2).replace("\\", "/").strip("/")
+    return f"/run/desktop/mnt/host/{drive}/{tail}" if tail else f"/run/desktop/mnt/host/{drive}"
 
 
 def build_managed_provider_runtime(root_config: dict[str, Any]) -> dict[str, Any]:
@@ -361,6 +373,43 @@ def write_env_file(path: Path, payload: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def apply_render_overrides(
+    root_config: dict[str, Any],
+    *,
+    register_output_dir_host: str = "",
+    register_team_auth_dir_host: str = "",
+    register_team_local_dir_host: str = "",
+    python_provider_image: str = "",
+) -> dict[str, Any]:
+    providers = root_config.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        root_config["providers"] = providers
+    python_provider = providers.setdefault("python", {})
+    if not isinstance(python_provider, dict):
+        python_provider = {}
+        providers["python"] = python_provider
+    host_mounts = python_provider.setdefault("hostMounts", {})
+    if not isinstance(host_mounts, dict):
+        host_mounts = {}
+        python_provider["hostMounts"] = host_mounts
+
+    overrides = {
+        "registerOutputDirHost": register_output_dir_host,
+        "registerTeamAuthDirHost": register_team_auth_dir_host,
+        "registerTeamLocalDirHost": register_team_local_dir_host,
+    }
+    for key, value in overrides.items():
+        normalized = str(value or "").strip()
+        if normalized:
+            host_mounts[key] = normalized
+
+    normalized_image = str(python_provider_image or "").strip()
+    if normalized_image:
+        python_provider["image"] = normalized_image
+    return root_config
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Render derived EasyProtocol config files from the root config.yaml."
@@ -370,13 +419,23 @@ def main() -> None:
     parser.add_argument("--service-env-output", default="")
     parser.add_argument("--stack-config-output", default="")
     parser.add_argument("--stack-env-output", default="")
+    parser.add_argument("--register-output-dir-host", default="")
+    parser.add_argument("--register-team-auth-dir-host", default="")
+    parser.add_argument("--register-team-local-dir-host", default="")
+    parser.add_argument("--python-provider-image", default="")
     args = parser.parse_args()
 
     root_config_path = Path(args.root_config).resolve()
     if not root_config_path.exists():
         raise SystemExit(f"Root config not found: {root_config_path}")
 
-    root_config = load_yaml(root_config_path)
+    root_config = apply_render_overrides(
+        load_yaml(root_config_path),
+        register_output_dir_host=args.register_output_dir_host,
+        register_team_auth_dir_host=args.register_team_auth_dir_host,
+        register_team_local_dir_host=args.register_team_local_dir_host,
+        python_provider_image=args.python_provider_image,
+    )
     rendered_runtime = build_service_base_runtime(root_config)
 
     if args.service_output:

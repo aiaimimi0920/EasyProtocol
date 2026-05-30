@@ -5,7 +5,11 @@ param(
     [string]$ServiceOutput = 'deploy/service/base/config/config.yaml',
     [string]$ServiceEnvOutput = 'deploy/service/base/config/runtime.env',
     [string]$StackConfigOutput = 'deploy/stacks/easy-protocol/generated/easy-protocol.config.yaml',
-    [string]$StackEnvOutput = 'deploy/stacks/easy-protocol/generated/stack.env'
+    [string]$StackEnvOutput = 'deploy/stacks/easy-protocol/generated/stack.env',
+    [string]$RegisterOutputDirHost = '',
+    [string]$RegisterTeamAuthDirHost = '',
+    [string]$RegisterTeamLocalDirHost = '',
+    [string]$PythonProviderImage = ''
 )
 
 Set-StrictMode -Version Latest
@@ -39,6 +43,18 @@ $resolveOutputPath = {
     return (Join-Path (Get-EasyProtocolRepoRoot) $Path)
 }
 $args = @($renderer, '--root-config', $resolvedConfigPath)
+if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) {
+    $args += @('--register-output-dir-host', $RegisterOutputDirHost)
+}
+if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) {
+    $args += @('--register-team-auth-dir-host', $RegisterTeamAuthDirHost)
+}
+if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) {
+    $args += @('--register-team-local-dir-host', $RegisterTeamLocalDirHost)
+}
+if (-not [string]::IsNullOrWhiteSpace($PythonProviderImage)) {
+    $args += @('--python-provider-image', $PythonProviderImage)
+}
 if ($ServiceBase) {
     $args += @('--service-output', (& $resolveOutputPath -Path $ServiceOutput))
     $args += @('--service-env-output', (& $resolveOutputPath -Path $ServiceEnvOutput))
