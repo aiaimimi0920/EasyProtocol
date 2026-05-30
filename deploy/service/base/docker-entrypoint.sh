@@ -34,6 +34,29 @@ if [ ! -f "$CONFIG_PATH" ]; then
   echo "[easy-protocol] generated default config at $CONFIG_PATH"
 fi
 
+apply_local_runtime_overrides() {
+  if [ ! -f "$RUNTIME_ENV_PATH" ]; then
+    return 0
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$RUNTIME_ENV_PATH"
+  set +a
+
+  python /usr/local/bin/patch-rendered-service-config.py \
+    --config-path "$CONFIG_PATH" \
+    --runtime-env-path "$RUNTIME_ENV_PATH" \
+    --python-provider-image "${EASY_PROTOCOL_PYTHON_PROVIDER_IMAGE:-}" \
+    --register-output-dir-host "${REGISTER_OUTPUT_DIR_HOST:-}" \
+    --register-team-auth-dir-host "${REGISTER_TEAM_AUTH_DIR_HOST:-}" \
+    --register-team-local-dir-host "${REGISTER_TEAM_LOCAL_DIR_HOST:-}" \
+    --mailbox-service-api-key "${MAILBOX_SERVICE_API_KEY:-}" \
+    --easy-proxy-api-key "${EASY_PROXY_API_KEY:-}"
+}
+
+apply_local_runtime_overrides
+
 if [ -f "$RUNTIME_ENV_PATH" ]; then
   set -a
   # shellcheck disable=SC1090
@@ -105,6 +128,7 @@ start_sync_loop() {
         --mode sync \
         --updated-flag-path "$SYNC_FLAG_PATH"
       if [ -f "$SYNC_FLAG_PATH" ]; then
+        apply_local_runtime_overrides
         echo "[easy-protocol] remote runtime config updated, restarting service"
         kill "$APP_PID" 2>/dev/null || true
         break

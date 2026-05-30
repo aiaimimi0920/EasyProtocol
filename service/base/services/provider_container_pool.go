@@ -62,13 +62,21 @@ type providerContainerPool struct {
 	mu         sync.Mutex
 	stopCh     chan struct{}
 	stopped    bool
-	docker     *dockerContainerClient
+	docker     providerContainerDocker
 	httpClient *http.Client
 }
 
 type providerContainerLease struct {
 	pool        *providerContainerPool
 	acquiredSvc string
+}
+
+type providerContainerDocker interface {
+	CreateContainer(ctx context.Context, name string, request dockerContainerCreateRequest) (string, error)
+	StartContainer(ctx context.Context, id string) error
+	StopContainer(ctx context.Context, name string, timeoutSeconds int) error
+	RemoveContainer(ctx context.Context, name string, force bool) error
+	InspectContainer(ctx context.Context, name string) (dockerContainerInspect, error)
 }
 
 func (l *providerContainerLease) Release() {
@@ -442,6 +450,14 @@ func (p *providerContainerPool) adoptExistingChildren(ctx context.Context, famil
 		if !inspect.State.Running {
 			continue
 		}
+		managedChild := strings.EqualFold(inspect.Config.Labels["easyprotocol.managed_child"], "true")
+		if managedChild && !dockerContainerImageMatches(inspect.Config.Image, family.image) {
+			_ = p.stopAndRemoveChild(ctx, &providerContainerChild{
+				containerName: containerName,
+				managed:       true,
+			})
+			continue
+		}
 		child := &providerContainerChild{
 			serviceName:   serviceName,
 			providerID:    family.providerID,
@@ -452,15 +468,15 @@ func (p *providerContainerPool) adoptExistingChildren(ctx context.Context, famil
 			port:          family.port,
 			healthy:       true,
 			lastIdleAt:    time.Now(),
-			managed:       strings.EqualFold(inspect.Config.Labels["easyprotocol.managed_child"], "true"),
+			managed:       managedChild,
 		}
 		if index >= family.nextReplicaIndex {
 			family.nextReplicaIndex = index + 1
 		}
-		if err := waitForProviderChildHealth(ctx, p.httpClient, child.endpoint); err != nil {
+		if err := providerChildHealthWaiter(ctx, p.httpClient, child.endpoint); err != nil {
 			continue
 		}
-		ops, err := fetchProviderChildCapabilities(ctx, p.httpClient, child.endpoint)
+		ops, err := providerChildCapabilitiesFetcher(ctx, p.httpClient, child.endpoint)
 		if err == nil && len(ops) > 0 {
 			child.healthy = true
 			family.supportedOps = ops
@@ -543,12 +559,12 @@ func (p *providerContainerPool) spawnChild(ctx context.Context, family *provider
 		managed:       true,
 	}
 
-	if err := waitForProviderChildHealth(ctx, p.httpClient, endpoint); err != nil {
+	if err := providerChildHealthWaiter(ctx, p.httpClient, endpoint); err != nil {
 		_ = p.stopAndRemoveChild(context.Background(), child)
 		return nil, err
 	}
 
-	ops, err := fetchProviderChildCapabilities(ctx, p.httpClient, endpoint)
+	ops, err := providerChildCapabilitiesFetcher(ctx, p.httpClient, endpoint)
 	if err == nil && len(ops) > 0 {
 		child.healthy = true
 		family.supportedOps = ops
@@ -698,6 +714,15 @@ func buildManagedProviderBinds(mounts []config.ManagedProviderHostMountConfig) [
 	return out
 }
 
+func dockerContainerImageMatches(actual string, expected string) bool {
+	normalizedActual := strings.TrimSpace(actual)
+	normalizedExpected := strings.TrimSpace(expected)
+	if normalizedActual == "" || normalizedExpected == "" {
+		return true
+	}
+	return normalizedActual == normalizedExpected || strings.HasPrefix(normalizedActual, normalizedExpected+"@")
+}
+
 var errDockerContainerNotFound = errors.New("docker container not found")
 
 type dockerContainerClient struct {
@@ -775,6 +800,7 @@ type dockerContainerInspect struct {
 		Running bool `json:"Running"`
 	} `json:"State"`
 	Config struct {
+		Image  string            `json:"Image"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 }

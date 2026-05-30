@@ -215,6 +215,7 @@ $resolvedConfigPath = Resolve-AbsolutePath -Path $ConfigPath -BaseDir $launcherR
 $configExamplePath = Resolve-AbsolutePath -Path "config.example.yaml" -BaseDir $repoRoot
 $deployScript = Resolve-AbsolutePath -Path "scripts\deploy-subproject.ps1" -BaseDir $repoRoot
 $writeBootstrapScript = Resolve-AbsolutePath -Path "scripts\write-service-base-r2-bootstrap.ps1" -BaseDir $repoRoot
+$patchRenderedServiceConfigScript = Resolve-AbsolutePath -Path "scripts\patch-rendered-service-config.py" -BaseDir $repoRoot
 $bootstrapRuntimeScript = Resolve-AbsolutePath -Path "deploy\service\base\bootstrap-service-config.py" -BaseDir $repoRoot
 $bootstrapHostPath = Resolve-AbsolutePath -Path "deploy\service\base\config\bootstrap\r2-bootstrap.json" -BaseDir $repoRoot
 $serviceBaseConfigPath = Resolve-AbsolutePath -Path "deploy\service\base\config\config.yaml" -BaseDir $repoRoot
@@ -274,6 +275,41 @@ if ($shouldBootstrapFromImport) {
         --runtime-env-path $serviceBaseRuntimeEnvPath
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to bootstrap EasyProtocol service/base config with exit code $LASTEXITCODE"
+    }
+
+    $resolvedProviderImage = $ProviderImage
+    if ([string]::IsNullOrWhiteSpace($resolvedProviderImage) -and -not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
+        $resolvedGhcrOwner = $GhcrOwner
+        if ([string]::IsNullOrWhiteSpace($resolvedGhcrOwner)) {
+            $resolvedGhcrOwner = $RepoOwner
+        }
+        $resolvedProviderImage = "ghcr.io/$resolvedGhcrOwner/easy-protocol-python:$ProviderReleaseTag"
+    }
+
+    $shouldPatchBootstrappedServiceConfig = `
+        (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage)) -or `
+        (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) -or `
+        (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) -or `
+        (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) -or `
+        (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) -or `
+        (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey))
+
+    if ($shouldPatchBootstrappedServiceConfig) {
+        $patchArgs = @(
+            $patchRenderedServiceConfigScript,
+            "--config-path", $serviceBaseConfigPath,
+            "--runtime-env-path", $serviceBaseRuntimeEnvPath
+        )
+        if (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage)) { $patchArgs += @("--python-provider-image", $resolvedProviderImage) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $patchArgs += @("--register-output-dir-host", $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $patchArgs += @("--register-team-auth-dir-host", $RegisterTeamAuthDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $patchArgs += @("--register-team-local-dir-host", $RegisterTeamLocalDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $patchArgs += @("--mailbox-service-api-key", $MailboxServiceApiKey) }
+        if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $patchArgs += @("--easy-proxy-api-key", $EasyProxyApiKey) }
+        & python @patchArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to patch bootstrapped EasyProtocol service/base config with exit code $LASTEXITCODE"
+        }
     }
 }
 

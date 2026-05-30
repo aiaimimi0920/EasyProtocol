@@ -191,6 +191,29 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
+    def test_service_base_dockerfile_includes_import_patch_tooling(self):
+        dockerfile_path = REPO_ROOT / "deploy" / "service" / "base" / "Dockerfile"
+        content = dockerfile_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            "COPY scripts/patch-rendered-service-config.py /usr/local/bin/patch-rendered-service-config.py",
+            "pyyaml",
+            "patch-rendered-service-config.py",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
+    def test_service_base_entrypoint_reapplies_local_overrides_after_import_sync(self):
+        entrypoint_path = REPO_ROOT / "deploy" / "service" / "base" / "docker-entrypoint.sh"
+        content = entrypoint_path.read_text(encoding="utf-8")
+
+        self.assertIn("apply_local_runtime_overrides()", content)
+        self.assertIn("--python-provider-image \"${EASY_PROTOCOL_PYTHON_PROVIDER_IMAGE:-}\"", content)
+        sync_patch_index = content.index("apply_local_runtime_overrides", content.index("if [ -f \"$SYNC_FLAG_PATH\" ]"))
+        restart_index = content.index("remote runtime config updated, restarting service")
+        self.assertLess(sync_patch_index, restart_index)
+
     def test_root_deploy_host_defaults_to_easy_protocol(self):
         content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
         self.assertIn('[string]$Project = "easy-protocol"', content)
@@ -273,6 +296,105 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertTrue(mounts["/shared/team-auth"]["read_only"])
             self.assertEqual("/run/desktop/mnt/host/c/runtime/team-local", mounts["/shared/local-team-store"]["source"])
             self.assertFalse(mounts["/shared/local-team-store"]["read_only"])
+
+    def test_patch_rendered_service_config_preserves_imported_config_and_applies_local_overrides(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rendered_config = Path(temp_dir) / "service-config.yaml"
+            runtime_env = Path(temp_dir) / "runtime.env"
+            rendered_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "listen": "0.0.0.0:9788",
+                        "managed_provider_runtime": {
+                            "providers": {
+                                "python": {
+                                    "image": "easy-protocol/easy-protocol-python:local",
+                                    "environment": {
+                                        "MAILBOX_SERVICE_API_KEY": "old-mailbox-key",
+                                        "EASY_PROXY_API_KEY": "old-proxy-key",
+                                    },
+                                    "host_mounts": [
+                                        {
+                                            "source": "C:/old/register-output",
+                                            "target": "/shared/register-output",
+                                            "read_only": False,
+                                        }
+                                    ],
+                                }
+                            }
+                        },
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            runtime_env.write_text(
+                "\n".join(
+                    [
+                        "MAILBOX_SERVICE_API_KEY=old-mailbox-key",
+                        "EASY_PROXY_API_KEY=old-proxy-key",
+                        "REGISTER_OUTPUT_DIR_HOST=C:/old/register-output",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "patch-rendered-service-config.py"),
+                    "--config-path",
+                    str(rendered_config),
+                    "--runtime-env-path",
+                    str(runtime_env),
+                    "--python-provider-image",
+                    "ghcr.io/test/easy-protocol-python:providers-smoke",
+                    "--register-output-dir-host",
+                    "C:/runtime/register-output",
+                    "--register-team-auth-dir-host",
+                    "C:/runtime/team-auth",
+                    "--register-team-local-dir-host",
+                    "C:/runtime/team-local",
+                    "--mailbox-service-api-key",
+                    "new-mailbox-key",
+                    "--easy-proxy-api-key",
+                    "new-proxy-key",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            patched = yaml.safe_load(rendered_config.read_text(encoding="utf-8"))
+            python_runtime = patched["managed_provider_runtime"]["providers"]["python"]
+            self.assertEqual("ghcr.io/test/easy-protocol-python:providers-smoke", python_runtime["image"])
+            self.assertEqual("new-mailbox-key", python_runtime["environment"]["MAILBOX_SERVICE_API_KEY"])
+            self.assertEqual("new-proxy-key", python_runtime["environment"]["EASY_PROXY_API_KEY"])
+            mounts = {item["target"]: item for item in python_runtime["host_mounts"]}
+            self.assertEqual(
+                "/run/desktop/mnt/host/c/runtime/register-output",
+                mounts["/shared/register-output"]["source"],
+            )
+            self.assertFalse(mounts["/shared/register-output"]["read_only"])
+            self.assertEqual("/run/desktop/mnt/host/c/runtime/team-auth", mounts["/shared/team-auth"]["source"])
+            self.assertTrue(mounts["/shared/team-auth"]["read_only"])
+            self.assertEqual("/run/desktop/mnt/host/c/runtime/team-local", mounts["/shared/local-team-store"]["source"])
+            self.assertFalse(mounts["/shared/local-team-store"]["read_only"])
+            env_lines = runtime_env.read_text(encoding="utf-8").splitlines()
+            self.assertIn("MAILBOX_SERVICE_API_KEY=new-mailbox-key", env_lines)
+            self.assertIn("EASY_PROXY_API_KEY=new-proxy-key", env_lines)
+            self.assertIn("EASY_PROTOCOL_PYTHON_PROVIDER_IMAGE=ghcr.io/test/easy-protocol-python:providers-smoke", env_lines)
+            self.assertIn("REGISTER_OUTPUT_DIR_HOST=C:/runtime/register-output", env_lines)
+            self.assertIn("REGISTER_TEAM_AUTH_DIR_HOST=C:/runtime/team-auth", env_lines)
+            self.assertIn("REGISTER_TEAM_LOCAL_DIR_HOST=C:/runtime/team-local", env_lines)
+
+    def test_root_deploy_host_patches_bootstrapped_service_config_before_skip_render_deploy(self):
+        content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
+        self.assertIn("patch-rendered-service-config.py", content)
+        self.assertIn("$shouldPatchBootstrappedServiceConfig", content)
 
     def test_isolated_instance_deploy_uses_single_easy_protocol_compose_project(self):
         content = (REPO_ROOT / "scripts" / "deploy-isolated-easyprotocol-instance.ps1").read_text(encoding="utf-8")
