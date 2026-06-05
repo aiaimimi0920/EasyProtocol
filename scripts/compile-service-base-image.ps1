@@ -25,6 +25,7 @@ $dockerfilePath = Join-Path $repoRoot $dockerfileRelative
 $imageRef = if ([string]::IsNullOrWhiteSpace($Image)) { $configuredImage } else { $Image }
 
 Write-Host "Building service/base image: $imageRef" -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot 'materialize-browser-runtime.ps1') -DestinationRoot $repoRoot
 docker build --platform $Platform -f $dockerfilePath -t $imageRef $contextPath
 if ($LASTEXITCODE -ne 0) {
     throw "Docker build failed with exit code $LASTEXITCODE"

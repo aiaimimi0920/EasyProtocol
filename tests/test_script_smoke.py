@@ -191,6 +191,126 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
+    def test_service_base_publish_workflow_materializes_easybrowser_runtime_before_docker_build(self):
+        workflow_path = REPO_ROOT / ".github" / "workflows" / "publish-service-base-ghcr.yml"
+        content = workflow_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            "Check Out EasyBrowser Runtime Source",
+            "repository: aiaimimi0920/EasyBrowser",
+            "path: EasyBrowser",
+            "Materialize EasyBrowser Runtime",
+            "scripts/materialize-browser-runtime.ps1",
+            "-EasyBrowserRepoRoot ./EasyBrowser",
+            "-DestinationRoot .",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
+        materialize_index = content.index("Materialize EasyBrowser Runtime")
+        smoke_build_index = content.index("Build Smoke Image")
+        build_push_index = content.index("Build And Push Service Base Image")
+        self.assertLess(materialize_index, smoke_build_index)
+        self.assertLess(materialize_index, build_push_index)
+
+    def test_materialize_browser_runtime_script_copies_easybrowser_runtime_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            easybrowser_root = temp_root / "EasyBrowser"
+            runtime_src = easybrowser_root / "runtimes" / "chrome" / "src"
+            (runtime_src / "browser_runtime").mkdir(parents=True)
+            (runtime_src / "shared_auth").mkdir(parents=True)
+            (runtime_src / "shared_mailbox").mkdir(parents=True)
+            (runtime_src / "browser_runtime" / "__init__.py").write_text("# runtime\n", encoding="utf-8")
+            (runtime_src / "shared_auth" / "__init__.py").write_text("# auth\n", encoding="utf-8")
+            (runtime_src / "shared_mailbox" / "cloudflare_temp_email_client.py").write_text("# mailbox\n", encoding="utf-8")
+            (easybrowser_root / "runtimes" / "chrome" / "requirements.txt").write_text("selenium\n", encoding="utf-8")
+
+            destination_root = temp_root / "EasyProtocol"
+            destination_root.mkdir()
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(REPO_ROOT / "scripts" / "materialize-browser-runtime.ps1"),
+                    "-EasyBrowserRepoRoot",
+                    str(easybrowser_root),
+                    "-DestinationRoot",
+                    str(destination_root),
+                ]
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            self.assertTrue((destination_root / "python_browser_service" / "src" / "browser_runtime" / "__init__.py").exists())
+            self.assertTrue((destination_root / "python_browser_service" / "src" / "shared_auth" / "__init__.py").exists())
+            self.assertTrue(
+                (
+                    destination_root
+                    / "python_browser_service"
+                    / "src"
+                    / "shared_mailbox"
+                    / "cloudflare_temp_email_client.py"
+                ).exists()
+            )
+            self.assertEqual(
+                (destination_root / "browser_runtime_requirements.txt").read_text(encoding="utf-8"),
+                "selenium\n",
+            )
+
+    def test_compile_service_base_image_materializes_browser_runtime_before_docker_build(self):
+        script_path = REPO_ROOT / "scripts" / "compile-service-base-image.ps1"
+        content = script_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            "materialize-browser-runtime.ps1",
+            "-DestinationRoot $repoRoot",
+            "docker build --platform $Platform",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
+        materialize_index = content.index("materialize-browser-runtime.ps1")
+        docker_build_index = content.index("docker build --platform $Platform")
+        self.assertLess(materialize_index, docker_build_index)
+
+    def test_gitignore_excludes_materialized_browser_runtime_inputs(self):
+        content = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        required_tokens = [
+            "python_browser_service/",
+            "browser_runtime_requirements.txt",
+            "EasyBrowser/",
+            "providers/python/python_shared/src/shared_auth/",
+            "providers/python/python_shared/src/shared_mailbox/cloudflare_temp_email_client.py",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
+    def test_dockerignore_excludes_easybrowser_checkout_but_keeps_materialized_runtime_inputs(self):
+        dockerignore_path = REPO_ROOT / ".dockerignore"
+        content = dockerignore_path.read_text(encoding="utf-8")
+
+        excluded_tokens = [
+            "EasyBrowser/",
+            ".repo-cache/",
+            "__pycache__/",
+            "*.pyc",
+        ]
+        for token in excluded_tokens:
+            self.assertIn(token, content)
+
+        kept_tokens = [
+            "python_browser_service/",
+            "browser_runtime_requirements.txt",
+            "providers/python/python_shared/src/shared_auth/",
+            "providers/python/python_shared/src/shared_mailbox/cloudflare_temp_email_client.py",
+        ]
+        for token in kept_tokens:
+            self.assertNotIn(token, content)
+
     def test_service_base_dockerfile_includes_browser_runtime_dependencies(self):
         dockerfile_path = REPO_ROOT / "deploy" / "service" / "base" / "Dockerfile"
         content = dockerfile_path.read_text(encoding="utf-8")

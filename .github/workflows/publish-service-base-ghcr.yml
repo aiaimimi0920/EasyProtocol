@@ -46,6 +46,12 @@ jobs:
       - name: Check Out Repository
         uses: actions/checkout@v6
 
+      - name: Check Out EasyBrowser Runtime Source
+        uses: actions/checkout@v6
+        with:
+          repository: aiaimimi0920/EasyBrowser
+          path: EasyBrowser
+
       - name: Set Up Python
         uses: actions/setup-python@v6
         with:
@@ -167,6 +173,13 @@ jobs:
 
       - name: Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Materialize EasyBrowser Runtime
+        shell: pwsh
+        run: >
+          ./scripts/materialize-browser-runtime.ps1
+          -EasyBrowserRepoRoot ./EasyBrowser
+          -DestinationRoot .
 
       - name: Build Smoke Image
         if: steps.release_meta.outputs.run_smoke == 'true'

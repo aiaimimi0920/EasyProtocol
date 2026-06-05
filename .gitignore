@@ -33,3 +33,10 @@ deploy/providers/go/config/
 deploy/providers/javascript/config/
 deploy/providers/rust/config/
 providers/rust/target/
+
+# Materialized from EasyBrowser only for Docker build contexts.
+EasyBrowser/
+python_browser_service/
+browser_runtime_requirements.txt
+providers/python/python_shared/src/shared_auth/
+providers/python/python_shared/src/shared_mailbox/cloudflare_temp_email_client.py

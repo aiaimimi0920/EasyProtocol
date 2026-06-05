@@ -1,0 +1,20 @@
+.git
+.repo-cache/
+.tmp/
+tmp/
+dist/
+coverage/
+node_modules/
+.pnpm-store/
+.wrangler/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.bak
+
+# Checked out by GitHub Actions only as the source for materialized runtime files.
+EasyBrowser/
