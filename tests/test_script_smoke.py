@@ -191,6 +191,39 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
+    def test_service_base_dockerfile_includes_browser_runtime_dependencies(self):
+        dockerfile_path = REPO_ROOT / "deploy" / "service" / "base" / "Dockerfile"
+        content = dockerfile_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            "COPY python_browser_service/src /opt/easy-protocol/python_browser_service/src",
+            "COPY browser_runtime_requirements.txt /opt/easy-protocol/browser_runtime_requirements.txt",
+            "-r /opt/easy-protocol/browser_runtime_requirements.txt",
+            "chromium",
+            "chromium-driver",
+            "libnspr4",
+            "libnss3",
+            "libdbus-1-3",
+            "CHROMEDRIVER_PATH=/usr/bin/chromedriver",
+            "BROWSER_BINARY_PATH=/usr/bin/chromium",
+            "USE_UNDETECTED_CHROMEDRIVER=0",
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
+    def test_managed_provider_process_pool_includes_browser_runtime_on_pythonpath(self):
+        process_pool_path = REPO_ROOT / "service" / "base" / "services" / "provider_process_pool.go"
+        content = process_pool_path.read_text(encoding="utf-8")
+
+        required_tokens = [
+            'filepath.Join(cwd, "..", "..", "python_browser_service", "src")',
+            '"/opt/easy-protocol/python_browser_service/src"',
+        ]
+
+        for token in required_tokens:
+            self.assertIn(token, content)
+
     def test_service_base_dockerfile_includes_import_patch_tooling(self):
         dockerfile_path = REPO_ROOT / "deploy" / "service" / "base" / "Dockerfile"
         content = dockerfile_path.read_text(encoding="utf-8")

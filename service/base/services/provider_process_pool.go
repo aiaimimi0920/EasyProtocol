@@ -574,8 +574,10 @@ func resolvePythonProviderServerPath() (string, []string, error) {
 				searchPaths := []string{
 					serverDir,
 					filepath.Join(filepath.Dir(serverDir), "python_shared", "src"),
+					filepath.Join(cwd, "..", "..", "python_browser_service", "src"),
 					"/opt/easy-protocol/providers/python/src",
 					"/opt/easy-protocol/providers/python/python_shared/src",
+					"/opt/easy-protocol/python_browser_service/src",
 				}
 				return candidate, compactSearchPaths(searchPaths), nil
 			}
@@ -586,6 +588,7 @@ func resolvePythonProviderServerPath() (string, []string, error) {
 		searchPaths := []string{
 			"/opt/easy-protocol/providers/python/src",
 			"/opt/easy-protocol/providers/python/python_shared/src",
+			"/opt/easy-protocol/python_browser_service/src",
 		}
 		return "/opt/easy-protocol/providers/python/src/server.py", compactSearchPaths(searchPaths), nil
 	}
