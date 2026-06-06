@@ -285,6 +285,37 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(2, session_request.call_count)
 
+    def test_submit_phone_number_retries_transient_network_error(self) -> None:
+        session = mock.Mock()
+        response = SimpleNamespace(status_code=200, url="https://auth.openai.com/api/accounts/add-phone/send")
+        with mock.patch.object(
+            protocol_register,
+            "_phone_resume_sentinel_context",
+            return_value=mock.Mock(),
+        ), mock.patch.object(
+            protocol_register,
+            "_build_protocol_headers",
+            return_value={"referer": "https://auth.openai.com/add-phone"},
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=[RuntimeError("curl: (28) Operation timed out"), response],
+        ) as session_request, mock.patch.object(
+            protocol_register,
+            "_extract_page_type",
+            return_value="sms_verification",
+        ):
+            result = protocol_register._submit_phone_number_via_protocol_session(
+                resume_context={"continueUrl": "https://auth.openai.com/add-phone"},
+                session=session,
+                phone_number="+15551234567",
+                explicit_proxy="http://proxy:8080",
+            )
+
+        self.assertEqual("phone_number_submitted", result["status"])
+        self.assertEqual("sms_verification", result["pageType"])
+        self.assertEqual(2, session_request.call_count)
+
     def test_extract_chatgpt_client_bootstrap_reads_access_token(self) -> None:
         html = """
         <html>

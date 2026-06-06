@@ -6161,7 +6161,7 @@ def _submit_phone_number_via_protocol_session(
             referer=continue_url,
             sentinel_context=sentinel_context,
         )
-        response = _session_request(
+        response = _protocol_request_with_transient_retry(
             session,
             "POST",
             ADD_PHONE_SEND_URL,
