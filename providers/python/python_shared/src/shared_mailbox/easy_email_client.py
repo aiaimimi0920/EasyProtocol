@@ -361,6 +361,20 @@ def _snapshot_session_openai_code(*, session_id: str, min_mail_id: int) -> tuple
     return best_code, best_marker
 
 
+def _resolve_openai_code_floor(*, mailbox_ref: str, session_id: str, min_mail_id: int) -> int:
+    requested_floor = max(0, int(min_mail_id or 0))
+    if requested_floor > 0:
+        return requested_floor
+    try:
+        latest_message_id = get_mailbox_latest_message_id(
+            mailbox_ref=mailbox_ref,
+            session_id=session_id,
+        )
+    except Exception:
+        latest_message_id = 0
+    return max(requested_floor, int(latest_message_id or 0))
+
+
 def _normalize_provider(provider: str) -> str:
     p = (provider or os.environ.get("MAILBOX_PROVIDER") or "mailtm").strip().lower()
     if p in ("self", "local", "mailcreate", "self-hosted"):
@@ -601,6 +615,14 @@ def wait_openai_code(
     if not effective_session_id:
         raise RuntimeError("mailbox_ref is invalid")
 
+    # Default to the newest message already present in this mailbox session so
+    # a later login/repair OTP request cannot accidentally reuse a stale code.
+    code_floor = _resolve_openai_code_floor(
+        mailbox_ref=ref,
+        session_id=effective_session_id,
+        min_mail_id=int(min_mail_id or 0),
+    )
+
     try:
         base_url = _mail_service_base_url()
     except Exception:
@@ -609,6 +631,7 @@ def wait_openai_code(
         "[mailbox] wait_openai_code mail-dispatch "
         f"base={base_url or '<missing>'} "
         f"session_id={effective_session_id} "
+        f"min_mail_id_floor={code_floor} "
         f"probe={_probe_mail_service() if base_url else 'base_url_missing'} "
         f"timeout_seconds={timeout_seconds}"
     )
@@ -623,32 +646,42 @@ def wait_openai_code(
     )
     snapshot_probe_every = max(1, int(max(1, poll_interval) * 3))
     last_snapshot_probe_at = 0.0
+    last_poll_error: Exception | None = None
     while time.time() < deadline:
-        response = _get_json(f"/mail/mailboxes/{effective_session_id}/code")
-        code_obj = response.get("code")
-        if isinstance(code_obj, dict):
-            code = _select_openai_verification_code(code_obj)
-            code_marker = _mail_dispatch_code_marker(code_obj)
-            if code and (int(min_mail_id or 0) <= 0 or code_marker > int(min_mail_id or 0)):
-                print(
-                    "[mailbox] wait_openai_code received "
-                    f"session_id={effective_session_id} code_len={len(code)} code_marker={code_marker}"
-                )
-                return code
-        if time.time() - last_snapshot_probe_at >= snapshot_probe_every:
+        code_endpoint_failed = False
+        try:
+            response = _get_json(f"/mail/mailboxes/{effective_session_id}/code")
+            code_obj = response.get("code")
+            if isinstance(code_obj, dict):
+                code = _select_openai_verification_code(code_obj)
+                code_marker = _mail_dispatch_code_marker(code_obj)
+                if code and (code_floor <= 0 or code_marker > code_floor):
+                    print(
+                        "[mailbox] wait_openai_code received "
+                        f"session_id={effective_session_id} code_len={len(code)} code_marker={code_marker}"
+                    )
+                    return code
+        except Exception as exc:
+            last_poll_error = exc
+            code_endpoint_failed = True
+        if code_endpoint_failed or time.time() - last_snapshot_probe_at >= snapshot_probe_every:
             last_snapshot_probe_at = time.time()
-            snapshot_code, snapshot_marker = _snapshot_session_openai_code(
-                session_id=effective_session_id,
-                min_mail_id=int(min_mail_id or 0),
-            )
-            if snapshot_code:
-                print(
-                    "[mailbox] wait_openai_code snapshot_fallback "
-                    f"session_id={effective_session_id} code_len={len(snapshot_code)} code_marker={snapshot_marker}"
+            try:
+                snapshot_code, snapshot_marker = _snapshot_session_openai_code(
+                    session_id=effective_session_id,
+                    min_mail_id=code_floor,
                 )
-                return snapshot_code
+                if snapshot_code:
+                    print(
+                        "[mailbox] wait_openai_code snapshot_fallback "
+                        f"session_id={effective_session_id} code_len={len(snapshot_code)} code_marker={snapshot_marker}"
+                    )
+                    return snapshot_code
+            except Exception as exc:
+                last_poll_error = exc
         time.sleep(poll_interval)
-    raise RuntimeError("timeout waiting for 6-digit code")
+    detail = f"; last_error={type(last_poll_error).__name__}: {last_poll_error}" if last_poll_error else ""
+    raise RuntimeError(f"timeout waiting for 6-digit code{detail}")
 
 
 def release_mailbox(

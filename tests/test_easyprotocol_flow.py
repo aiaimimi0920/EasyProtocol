@@ -51,6 +51,87 @@ class EasyProtocolFlowTests(unittest.TestCase):
 
         self.assertEqual(1779975000, marker)
 
+    def test_wait_openai_code_resolves_default_floor_before_polling(self) -> None:
+        calls: list[str] = []
+
+        def _fake_get_json(path: str) -> dict:
+            calls.append(path)
+            if path == "/mail/mailboxes/mailbox_123/code":
+                return {
+                    "code": {
+                        "code": "111111",
+                        "receivedAt": "2026-06-06T10:00:00Z",
+                    }
+                }
+            if path == "/mail/snapshot":
+                return {
+                    "snapshot": {
+                        "messages": [
+                            {
+                                "sessionId": "mailbox_123",
+                                "extractedCode": "222222",
+                                "receivedAt": "2026-06-06T10:00:05Z",
+                            }
+                        ]
+                    }
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        with mock.patch.object(easy_email_client, "_get_json", side_effect=_fake_get_json):
+            code = easy_email_client.wait_openai_code(
+                mailbox_ref="moemail:mailbox_123",
+                session_id="mailbox_123",
+                timeout_seconds=5,
+            )
+
+        self.assertEqual("222222", code)
+        self.assertEqual(
+            [
+                "/mail/mailboxes/mailbox_123/code",
+                "/mail/mailboxes/mailbox_123/code",
+                "/mail/snapshot",
+            ],
+            calls,
+        )
+
+    def test_wait_openai_code_uses_snapshot_after_transient_code_endpoint_error(self) -> None:
+        calls: list[str] = []
+
+        def _fake_get_json(path: str) -> dict:
+            calls.append(path)
+            if path == "/mail/mailboxes/mailbox_123/code":
+                if calls.count(path) == 1:
+                    return {
+                        "code": {
+                            "code": "111111",
+                            "receivedAt": "2026-06-06T10:00:00Z",
+                        }
+                    }
+                raise RuntimeError("mail service GET /mail/mailboxes/mailbox_123/code failed: HTTP 502")
+            if path == "/mail/snapshot":
+                return {
+                    "snapshot": {
+                        "messages": [
+                            {
+                                "sessionId": "mailbox_123",
+                                "extractedCode": "222222",
+                                "receivedAt": "2026-06-06T10:00:05Z",
+                            }
+                        ]
+                    }
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        with mock.patch.object(easy_email_client, "_get_json", side_effect=_fake_get_json):
+            code = easy_email_client.wait_openai_code(
+                mailbox_ref="moemail:mailbox_123",
+                session_id="mailbox_123",
+                timeout_seconds=5,
+            )
+
+        self.assertEqual("222222", code)
+        self.assertIn("/mail/snapshot", calls)
+
     def test_update_team_expand_progress_payload_sets_last_updated_at(self) -> None:
         payload = {
             "teamFlow": {
