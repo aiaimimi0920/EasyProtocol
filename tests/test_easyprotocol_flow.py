@@ -132,6 +132,41 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("222222", code)
         self.assertIn("/mail/snapshot", calls)
 
+    def test_wait_openai_code_accepts_code_equal_to_auto_floor(self) -> None:
+        with mock.patch.object(
+            easy_email_client,
+            "_resolve_openai_code_floor",
+            return_value=123,
+        ), mock.patch.object(
+            easy_email_client,
+            "_get_json",
+            return_value={
+                "code": {
+                    "code": "654321",
+                    "receivedAt": "1970-01-01T00:02:03+00:00",
+                }
+            },
+        ), mock.patch.object(
+            easy_email_client,
+            "_snapshot_session_openai_code",
+            return_value=("", 0),
+        ), mock.patch.object(
+            easy_email_client.time,
+            "time",
+            side_effect=[0, 0, 0, 11],
+        ), mock.patch.object(
+            easy_email_client.time,
+            "sleep",
+            return_value=None,
+        ):
+            code = easy_email_client.wait_openai_code(
+                mailbox_ref="moemail:mailbox_123",
+                session_id="mailbox_123",
+                timeout_seconds=10,
+            )
+
+        self.assertEqual("654321", code)
+
     def test_update_team_expand_progress_payload_sets_last_updated_at(self) -> None:
         payload = {
             "teamFlow": {
