@@ -539,6 +539,11 @@ func (p *providerContainerPool) spawnChild(ctx context.Context, family *provider
 
 	containerID, err := p.docker.CreateContainer(ctx, containerName, createRequest)
 	if err != nil {
+		if dockerContainerNameConflict(err) {
+			if child, adoptErr := p.adoptConflictingChild(ctx, family, serviceName, containerName, endpoint); adoptErr == nil {
+				return child, nil
+			}
+		}
 		return nil, err
 	}
 	if err := p.docker.StartContainer(ctx, containerID); err != nil {
@@ -580,6 +585,70 @@ func (p *providerContainerPool) spawnChild(ctx context.Context, family *provider
 	p.registry.Register(registry.NewService(serviceName, family.language, endpoint, true, family.supportedOps))
 	p.mu.Unlock()
 	return child, nil
+}
+
+func (p *providerContainerPool) adoptConflictingChild(
+	ctx context.Context,
+	family *providerContainerFamily,
+	serviceName string,
+	containerName string,
+	endpoint string,
+) (*providerContainerChild, error) {
+	inspect, err := p.docker.InspectContainer(ctx, containerName)
+	if err != nil {
+		return nil, err
+	}
+	if !inspect.State.Running {
+		return nil, fmt.Errorf("conflicting provider container %s is not running", containerName)
+	}
+	if !strings.EqualFold(inspect.Config.Labels["easyprotocol.managed_child"], "true") {
+		return nil, fmt.Errorf("conflicting provider container %s is not an EasyProtocol managed child", containerName)
+	}
+	if !dockerContainerImageMatches(inspect.Config.Image, family.image) {
+		return nil, fmt.Errorf("conflicting provider container %s image %q does not match %q", containerName, inspect.Config.Image, family.image)
+	}
+
+	child := &providerContainerChild{
+		serviceName:   serviceName,
+		providerID:    family.providerID,
+		language:      family.language,
+		endpoint:      endpoint,
+		containerName: containerName,
+		containerID:   inspect.ID,
+		port:          family.port,
+		healthy:       true,
+		lastIdleAt:    time.Now(),
+		managed:       true,
+	}
+
+	if err := providerChildHealthWaiter(ctx, p.httpClient, endpoint); err != nil {
+		return nil, err
+	}
+
+	ops, err := providerChildCapabilitiesFetcher(ctx, p.httpClient, endpoint)
+	if err == nil && len(ops) > 0 {
+		child.healthy = true
+		family.supportedOps = ops
+	}
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return nil, errors.New("provider container pool stopped")
+	}
+	family.children[serviceName] = child
+	p.registry.Register(registry.NewService(serviceName, family.language, endpoint, true, family.supportedOps))
+	p.mu.Unlock()
+	return child, nil
+}
+
+func dockerContainerNameConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "status=409") ||
+		(strings.Contains(message, "conflict") && strings.Contains(message, "already in use"))
 }
 
 func (p *providerContainerPool) stopAndRemoveChild(ctx context.Context, child *providerContainerChild) error {

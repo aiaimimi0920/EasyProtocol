@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -72,16 +73,91 @@ func TestProviderContainerPoolAdoptRemovesManagedChildWithMismatchedImage(t *tes
 	}
 }
 
+func TestProviderContainerPoolSpawnAdoptsConflictingManagedChild(t *testing.T) {
+	originalHealthWaiter := providerChildHealthWaiter
+	originalCapabilitiesFetcher := providerChildCapabilitiesFetcher
+	t.Cleanup(func() {
+		providerChildHealthWaiter = originalHealthWaiter
+		providerChildCapabilitiesFetcher = originalCapabilitiesFetcher
+	})
+	providerChildHealthWaiter = func(_ context.Context, _ *http.Client, _ string) error {
+		return nil
+	}
+	providerChildCapabilitiesFetcher = func(_ context.Context, _ *http.Client, _ string) ([]string, error) {
+		return []string{"codex.semantic.step"}, nil
+	}
+
+	docker := &fakeProviderContainerDocker{
+		createErr: errors.New(`docker api POST /containers/create?name=easy-protocol-python-001 failed: status=409 body={"message":"Conflict. The container name \"/easy-protocol-python-001\" is already in use"}`),
+		inspects: map[string]dockerContainerInspect{
+			"easy-protocol-python-001": {
+				ID: "existing-container",
+				State: struct {
+					Running bool `json:"Running"`
+				}{Running: true},
+				Config: struct {
+					Image  string            `json:"Image"`
+					Labels map[string]string `json:"Labels"`
+				}{
+					Image: "ghcr.io/test/easy-protocol-python:new",
+					Labels: map[string]string{
+						"easyprotocol.managed_child": "true",
+					},
+				},
+			},
+		},
+	}
+	family := &providerContainerFamily{
+		providerID:          "python",
+		language:            "python",
+		servicePrefix:       "PythonProtocol",
+		containerNamePrefix: "easy-protocol-python",
+		endpointHostPrefix:  "easy-protocol-python",
+		image:               "ghcr.io/test/easy-protocol-python:new",
+		port:                9100,
+		supportedOps:        []string{"codex.semantic.step"},
+		maxReplicas:         1,
+		nextReplicaIndex:    1,
+		children:            map[string]*providerContainerChild{},
+	}
+	pool := &providerContainerPool{
+		registry:   registry.New(),
+		docker:     docker,
+		httpClient: &http.Client{},
+	}
+
+	child, err := pool.spawnChild(context.Background(), family)
+	if err != nil {
+		t.Fatalf("spawn should adopt existing managed child on docker name conflict: %v", err)
+	}
+
+	if child.containerID != "existing-container" {
+		t.Fatalf("expected adopted container id, got %q", child.containerID)
+	}
+	if len(family.children) != 1 {
+		t.Fatalf("expected adopted child to be registered, got %d", len(family.children))
+	}
+	if docker.started != 0 {
+		t.Fatalf("expected no start call for already running child, got %d", docker.started)
+	}
+}
+
 type fakeProviderContainerDocker struct {
-	inspects map[string]dockerContainerInspect
-	removed  []string
+	inspects  map[string]dockerContainerInspect
+	removed   []string
+	createErr error
+	started   int
 }
 
 func (f *fakeProviderContainerDocker) CreateContainer(_ context.Context, _ string, _ dockerContainerCreateRequest) (string, error) {
+	if f.createErr != nil {
+		return "", f.createErr
+	}
 	return "", nil
 }
 
 func (f *fakeProviderContainerDocker) StartContainer(_ context.Context, _ string) error {
+	f.started++
 	return nil
 }
 
