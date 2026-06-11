@@ -83,6 +83,14 @@ if ($useGhcrDeploy) {
         $Image = "$registry/$GhcrOwner/${serviceImageName}:$ReleaseTag"
     }
 
+    if ((-not $SkipPull) -and (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage))) {
+        Write-Host "Pulling managed provider image: $resolvedProviderImage" -ForegroundColor Cyan
+        Invoke-EasyProtocolExternalCommand -FilePath 'docker' -Arguments @(
+            'pull',
+            $resolvedProviderImage
+        ) -FailureMessage "docker pull failed for provider image: $resolvedProviderImage"
+    }
+
     $runtimeRoot = Split-Path -Parent $composeFile
     $deployGhcrScript = Join-Path $repoRoot 'deploy/service/base/scripts/deploy-ghcr-easy-protocol-service.ps1'
     $args = @(

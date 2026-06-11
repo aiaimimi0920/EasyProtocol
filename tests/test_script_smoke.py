@@ -127,6 +127,48 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn(str(rendered_runtime_env), args)
             self.assertIn("-SkipPull", args)
 
+    def test_deploy_service_base_pulls_provider_image_for_ghcr_provider_tag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_path = Path(temp_dir) / "external.jsonl"
+            temp_config = Path(temp_dir) / "config.yaml"
+            rendered_config = Path(temp_dir) / "service-config.yaml"
+            rendered_runtime_env = Path(temp_dir) / "runtime.env"
+            rendered_config.write_text("listen: 0.0.0.0:9788\n", encoding="utf-8")
+            rendered_runtime_env.write_text("EASY_PROTOCOL_RESET_STORE_ON_BOOT=false\n", encoding="utf-8")
+
+            template = (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")
+            temp_config.write_text(template.replace('owner: ""', 'owner: test-owner'), encoding="utf-8")
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(REPO_ROOT / "scripts" / "deploy-service-base.ps1"),
+                    "-ConfigPath",
+                    str(temp_config),
+                    "-FromGhcr",
+                    "-ReleaseTag",
+                    "service-smoke",
+                    "-ProviderReleaseTag",
+                    "providers-smoke",
+                    "-SkipRender",
+                    "-ServiceOutput",
+                    str(rendered_config),
+                    "-ServiceEnvOutput",
+                    str(rendered_runtime_env),
+                ],
+                env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            records = read_json_lines(capture_path)
+            self.assertGreaterEqual(len(records), 2)
+            self.assertEqual("docker", records[0]["FilePath"])
+            self.assertEqual(
+                ["pull", "ghcr.io/test-owner/easy-protocol-python:providers-smoke"],
+                records[0]["Arguments"],
+            )
+            self.assertTrue(records[-1]["FilePath"].lower().endswith("deploy-ghcr-easy-protocol-service.ps1"))
+
     def test_external_command_helper_runs_powershell_script_with_named_arguments(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             helper_script = Path(temp_dir) / "echo-params.ps1"
