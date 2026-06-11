@@ -435,8 +435,8 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
         return run_protocol_platform_organization_init_from_path(
             source_path=str(step_input.get("source_path") or "").strip(),
             explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
-            organization_name=str(step_input.get("organization_name") or "").strip() or "personal",
-            organization_title=str(step_input.get("organization_title") or "").strip() or "personal",
+            organization_name=str(step_input.get("organization_name") or "").strip() or "Personal",
+            organization_title=str(step_input.get("organization_title") or "").strip() or "Personal",
             developer_persona=str(step_input.get("developer_persona") or "").strip() or "student",
         )
 

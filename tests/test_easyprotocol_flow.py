@@ -368,6 +368,7 @@ class EasyProtocolFlowTests(unittest.TestCase):
     def test_platform_org_init_persists_oauth_refresh_material_without_returning_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             seed_path = Path(tmp_dir) / "small-success.json"
+            organization_update_payloads: list[dict[str, object]] = []
             seed_path.write_text(
                 json.dumps(
                     {
@@ -419,7 +420,12 @@ class EasyProtocolFlowTests(unittest.TestCase):
                             }
                         },
                     )
-                if request_label in {"platform-organization-update", "platform-organization-user-update"}:
+                if request_label == "platform-organization-update":
+                    request_json = kwargs.get("json")
+                    self.assertIsInstance(request_json, dict)
+                    organization_update_payloads.append(dict(request_json))
+                    return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
+                if request_label == "platform-organization-user-update":
                     return SimpleNamespace(status_code=200, json=lambda: {"ok": True})
                 raise AssertionError(f"unexpected request label: {request_label}")
 
@@ -435,6 +441,8 @@ class EasyProtocolFlowTests(unittest.TestCase):
                 result = protocol_platform_org.run_protocol_platform_organization_init_from_path(
                     source_path=seed_path,
                     explicit_proxy="http://proxy:8080",
+                    organization_name="Personal",
+                    organization_title="Personal",
                 )
 
             self.assertTrue(result["ok"])
@@ -457,6 +465,29 @@ class EasyProtocolFlowTests(unittest.TestCase):
             self.assertEqual(3600, oauth_tokens["expires_in"])
             self.assertEqual("Bearer", oauth_tokens["token_type"])
             self.assertTrue(str(oauth_tokens["exchanged_at"]).endswith("Z"))
+            self.assertEqual(1, len(organization_update_payloads))
+            self.assertEqual("personal", organization_update_payloads[0]["name"])
+            self.assertEqual("Personal", organization_update_payloads[0]["title"])
+
+    def test_initialize_platform_organization_dispatch_defaults_to_personal_title(self) -> None:
+        with mock.patch.object(
+            easyprotocol_flow,
+            "run_protocol_platform_organization_init_from_path",
+            return_value={"ok": True, "status": "completed"},
+        ) as platform_org_init:
+            result = easyprotocol_flow.dispatch_easyprotocol_step(
+                step_type="initialize_platform_organization",
+                step_input={"source_path": "/tmp/source.json", "proxy_url": "http://proxy.local:8080"},
+            )
+
+        self.assertTrue(result["ok"])
+        platform_org_init.assert_called_once_with(
+            source_path="/tmp/source.json",
+            explicit_proxy="http://proxy.local:8080",
+            organization_name="Personal",
+            organization_title="Personal",
+            developer_persona="student",
+        )
 
     def test_chatgpt_login_details_merge_preserves_existing_oauth_tokens(self) -> None:
         details = protocol_chatgpt_login._merge_chatgpt_login_details(

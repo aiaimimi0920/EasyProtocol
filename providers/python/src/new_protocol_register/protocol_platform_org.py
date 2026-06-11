@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,15 @@ _PLATFORM_ORGANIZATION_USER_UPDATE_TEMPLATE = "https://api.openai.com/v1/organiz
 _PLATFORM_REFERER = "https://platform.openai.com/"
 _PLATFORM_ORIGIN = "https://platform.openai.com"
 _PLATFORM_ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9,en;q=0.8"
+
+
+def _platform_organization_api_name(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    if not slug:
+        return "personal"
+    slug = slug[:42].strip("-")
+    return slug or "personal"
 
 
 def _auth0_client_header_value() -> str:
@@ -382,8 +392,8 @@ def run_protocol_platform_organization_init_from_path(
     *,
     source_path: str | Path,
     explicit_proxy: str | None = None,
-    organization_name: str = "personal",
-    organization_title: str = "personal",
+    organization_name: str = "Personal",
+    organization_title: str = "Personal",
     developer_persona: str = "student",
 ) -> dict[str, Any]:
     seed_path = Path(source_path).resolve()
@@ -533,8 +543,8 @@ def run_protocol_platform_organization_init_from_path(
                     explicit_proxy=explicit_proxy,
                 ),
                 json={
-                    "name": str(organization_name or "").strip() or "personal",
-                    "title": str(organization_title or "").strip() or "personal",
+                    "name": _platform_organization_api_name(organization_name),
+                    "title": str(organization_title or "").strip() or "Personal",
                     "settings": {
                         "completed_platform_onboarding": True,
                     },
