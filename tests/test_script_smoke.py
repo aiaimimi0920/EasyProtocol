@@ -574,9 +574,55 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("MAILBOX_SERVICE_API_KEY=new-mailbox-key", env_lines)
             self.assertIn("EASY_PROXY_API_KEY=new-proxy-key", env_lines)
             self.assertIn("EASY_PROTOCOL_PYTHON_PROVIDER_IMAGE=ghcr.io/test/easy-protocol-python:providers-smoke", env_lines)
-            self.assertIn("REGISTER_OUTPUT_DIR_HOST=C:/runtime/register-output", env_lines)
-            self.assertIn("REGISTER_TEAM_AUTH_DIR_HOST=C:/runtime/team-auth", env_lines)
-            self.assertIn("REGISTER_TEAM_LOCAL_DIR_HOST=C:/runtime/team-local", env_lines)
+            self.assertIn("REGISTER_OUTPUT_DIR_HOST=/run/desktop/mnt/host/c/runtime/register-output", env_lines)
+            self.assertIn("REGISTER_TEAM_AUTH_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-auth", env_lines)
+            self.assertIn("REGISTER_TEAM_LOCAL_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-local", env_lines)
+
+    def test_patch_rendered_service_config_writes_docker_daemon_paths_to_runtime_env(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rendered_config = Path(temp_dir) / "service-config.yaml"
+            runtime_env = Path(temp_dir) / "runtime.env"
+            rendered_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "listen": "0.0.0.0:9788",
+                        "managed_provider_runtime": {"providers": {"python": {"host_mounts": []}}},
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            runtime_env.write_text("EASY_PROTOCOL_RESET_STORE_ON_BOOT=false\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "patch-rendered-service-config.py"),
+                    "--config-path",
+                    str(rendered_config),
+                    "--runtime-env-path",
+                    str(runtime_env),
+                    "--register-output-dir-host",
+                    r"C:\runtime\register-output",
+                    "--register-team-auth-dir-host",
+                    r"C:\runtime\team-auth",
+                    "--register-team-local-dir-host",
+                    r"C:\runtime\team-local",
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            env_lines = runtime_env.read_text(encoding="utf-8").splitlines()
+            self.assertIn(
+                "REGISTER_OUTPUT_DIR_HOST=/run/desktop/mnt/host/c/runtime/register-output",
+                env_lines,
+            )
+            self.assertIn("REGISTER_TEAM_AUTH_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-auth", env_lines)
+            self.assertIn("REGISTER_TEAM_LOCAL_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-local", env_lines)
 
     def test_root_deploy_host_patches_bootstrapped_service_config_before_skip_render_deploy(self):
         content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")

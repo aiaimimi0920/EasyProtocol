@@ -143,9 +143,9 @@ def patch_env(
         "EASY_PROTOCOL_PYTHON_PROVIDER_IMAGE": python_provider_image,
         "MAILBOX_SERVICE_API_KEY": mailbox_service_api_key,
         "EASY_PROXY_API_KEY": easy_proxy_api_key,
-        "REGISTER_OUTPUT_DIR_HOST": register_output_dir_host,
-        "REGISTER_TEAM_AUTH_DIR_HOST": register_team_auth_dir_host,
-        "REGISTER_TEAM_LOCAL_DIR_HOST": register_team_local_dir_host,
+        "REGISTER_OUTPUT_DIR_HOST": normalize_docker_daemon_host_path(register_output_dir_host),
+        "REGISTER_TEAM_AUTH_DIR_HOST": normalize_docker_daemon_host_path(register_team_auth_dir_host),
+        "REGISTER_TEAM_LOCAL_DIR_HOST": normalize_docker_daemon_host_path(register_team_local_dir_host),
     }
     for key, value in overrides.items():
         if value and env.get(key) != value:
