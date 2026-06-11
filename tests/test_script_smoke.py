@@ -371,6 +371,40 @@ class ScriptSmokeTests(unittest.TestCase):
         content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
         self.assertIn('[string]$Project = "easy-protocol"', content)
 
+    def test_root_deploy_host_passes_default_owner_for_ghcr_provider_release(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capture_path = Path(temp_dir) / "external.jsonl"
+            temp_config = Path(temp_dir) / "config.yaml"
+            temp_config.write_text(
+                (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+
+            result = self.run_powershell(
+                [
+                    "-File",
+                    str(REPO_ROOT / "deploy-host.ps1"),
+                    "-Project",
+                    "service-base-ghcr",
+                    "-ConfigPath",
+                    str(temp_config),
+                    "-ReleaseTag",
+                    "service-base-smoke",
+                    "-ProviderReleaseTag",
+                    "providers-smoke",
+                    "-SkipRender",
+                    "-SkipPull",
+                ],
+                env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            records = read_json_lines(capture_path)
+            self.assertEqual(len(records), 1)
+            args = records[0]["Arguments"]
+            self.assertIn("-GhcrOwner", args)
+            self.assertIn("aiaimimi0920", args)
+
     def test_render_derived_configs_expands_numbered_provider_hosts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root_config = Path(temp_dir) / "config.yaml"

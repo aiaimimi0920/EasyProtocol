@@ -252,6 +252,16 @@ $shouldBootstrapFromImport = -not [string]::IsNullOrWhiteSpace($ImportCode) -or 
 if ($shouldBootstrapFromImport -and $Project -notin @('service-base', 'service-base-ghcr', 'easy-protocol', 'isolated-instance', 'isolated-instance-ghcr')) {
     throw "Project '$Project' does not support ImportCode/BootstrapFile bootstrap."
 }
+
+$resolvedGhcrOwner = $GhcrOwner
+$requiresGhcrOwnerDefault = `
+    ($Project -in @('service-base-ghcr', 'isolated-instance-ghcr')) -or `
+    (-not [string]::IsNullOrWhiteSpace($ReleaseTag)) -or `
+    (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag))
+if ([string]::IsNullOrWhiteSpace($resolvedGhcrOwner) -and $requiresGhcrOwnerDefault) {
+    $resolvedGhcrOwner = $RepoOwner
+}
+
 if ($shouldBootstrapFromImport) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bootstrapHostPath) | Out-Null
     if (-not [string]::IsNullOrWhiteSpace($ImportCode)) {
@@ -279,10 +289,6 @@ if ($shouldBootstrapFromImport) {
 
     $resolvedProviderImage = $ProviderImage
     if ([string]::IsNullOrWhiteSpace($resolvedProviderImage) -and -not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
-        $resolvedGhcrOwner = $GhcrOwner
-        if ([string]::IsNullOrWhiteSpace($resolvedGhcrOwner)) {
-            $resolvedGhcrOwner = $RepoOwner
-        }
         $resolvedProviderImage = "ghcr.io/$resolvedGhcrOwner/easy-protocol-python:$ProviderReleaseTag"
     }
 
@@ -331,7 +337,7 @@ if (-not [string]::IsNullOrWhiteSpace($ProviderTarget)) { $args += @("-ProviderT
 if (-not [string]::IsNullOrWhiteSpace($InstanceName)) { $args += @("-InstanceName", $InstanceName) }
 if ($GatewayHostPort -gt 0) { $args += @("-GatewayHostPort", [string]$GatewayHostPort) }
 if ($PythonManagerHostPort -gt 0) { $args += @("-PythonManagerHostPort", [string]$PythonManagerHostPort) }
-if (-not [string]::IsNullOrWhiteSpace($GhcrOwner)) { $args += @("-GhcrOwner", $GhcrOwner) }
+if (-not [string]::IsNullOrWhiteSpace($resolvedGhcrOwner)) { $args += @("-GhcrOwner", $resolvedGhcrOwner) }
 if (-not [string]::IsNullOrWhiteSpace($Image)) { $args += @("-Image", $Image) }
 if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @("-ProviderImage", $ProviderImage) }
 if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @("-ProviderReleaseTag", $ProviderReleaseTag) }
