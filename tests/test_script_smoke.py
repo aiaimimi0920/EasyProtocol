@@ -438,6 +438,7 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn('"boto3"', content, msg=str(script_path))
             self.assertIn('"urllib3"', content, msg=str(script_path))
             self.assertIn("setLevel(logging.WARNING)", content, msg=str(script_path))
+            self.assertIn("logging.disable(logging.DEBUG)", content, msg=str(script_path))
 
     def test_service_base_entrypoint_reapplies_local_overrides_after_import_sync(self):
         entrypoint_path = REPO_ROOT / "deploy" / "service" / "base" / "docker-entrypoint.sh"

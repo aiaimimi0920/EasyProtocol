@@ -13,6 +13,7 @@ from typing import Any
 import boto3
 
 
+logging.disable(logging.DEBUG)
 for logger_name in ("boto3", "botocore", "s3transfer", "urllib3"):
     logging.getLogger(logger_name).setLevel(logging.WARNING)
 
