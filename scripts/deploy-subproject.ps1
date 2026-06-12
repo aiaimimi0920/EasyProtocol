@@ -122,6 +122,8 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
+        if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $args += @('-EasyProxyApiKey', $EasyProxyApiKey) }
         Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-service-base.ps1') -Arguments $args -FailureMessage 'deploy-service-base.ps1 failed'
         break
     }
@@ -136,6 +138,8 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
+        if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $args += @('-EasyProxyApiKey', $EasyProxyApiKey) }
         if ($SkipPull) { $args += '-SkipPull' }
         Invoke-EasyProtocolExternalCommand -FilePath (Join-Path $PSScriptRoot 'deploy-service-base.ps1') -Arguments $args -FailureMessage 'deploy-service-base.ps1 failed'
         break

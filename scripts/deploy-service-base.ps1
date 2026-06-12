@@ -11,6 +11,8 @@ param(
     [string]$RegisterOutputDirHost = '',
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
+    [string]$MailboxServiceApiKey = '',
+    [string]$EasyProxyApiKey = '',
     [string]$ServiceOutput = 'deploy/service/base/config/config.yaml',
     [string]$ServiceEnvOutput = 'deploy/service/base/config/runtime.env',
     [switch]$SkipPull
@@ -68,6 +70,17 @@ if (-not (Test-Path -LiteralPath $renderedConfigPath)) {
 }
 if (-not (Test-Path -LiteralPath $renderedRuntimeEnvPath)) {
     throw "Missing rendered runtime env: $renderedRuntimeEnvPath"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey) -or -not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) {
+    $patchArgs = @(
+        (Join-Path $repoRoot 'scripts/patch-rendered-service-config.py'),
+        '--config-path', $renderedConfigPath,
+        '--runtime-env-path', $renderedRuntimeEnvPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $patchArgs += @('--mailbox-service-api-key', $MailboxServiceApiKey) }
+    if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $patchArgs += @('--easy-proxy-api-key', $EasyProxyApiKey) }
+    Invoke-EasyProtocolExternalCommand -FilePath 'python' -Arguments $patchArgs -FailureMessage 'patch-rendered-service-config.py failed'
 }
 
 if ($useGhcrDeploy) {

@@ -451,7 +451,8 @@ func (p *providerContainerPool) adoptExistingChildren(ctx context.Context, famil
 			continue
 		}
 		managedChild := strings.EqualFold(inspect.Config.Labels["easyprotocol.managed_child"], "true")
-		if managedChild && !dockerContainerImageMatches(inspect.Config.Image, family.image) {
+		if managedChild && (!dockerContainerImageMatches(inspect.Config.Image, family.image) ||
+			!dockerContainerEnvMatches(inspect.Config.Env, buildManagedProviderEnv(family, serviceName))) {
 			_ = p.stopAndRemoveChild(ctx, &providerContainerChild{
 				containerName: containerName,
 				managed:       true,
@@ -606,6 +607,9 @@ func (p *providerContainerPool) adoptConflictingChild(
 	}
 	if !dockerContainerImageMatches(inspect.Config.Image, family.image) {
 		return nil, fmt.Errorf("conflicting provider container %s image %q does not match %q", containerName, inspect.Config.Image, family.image)
+	}
+	if !dockerContainerEnvMatches(inspect.Config.Env, buildManagedProviderEnv(family, serviceName)) {
+		return nil, fmt.Errorf("conflicting provider container %s environment does not match desired spec", containerName)
 	}
 
 	child := &providerContainerChild{
@@ -766,6 +770,28 @@ func buildManagedProviderEnv(family *providerContainerFamily, serviceName string
 	return env
 }
 
+func dockerContainerEnvMatches(actual []string, expected []string) bool {
+	actualByKey := make(map[string]string, len(actual))
+	for _, item := range actual {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		actualByKey[key] = value
+	}
+	for _, item := range expected {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		actualValue, exists := actualByKey[key]
+		if !exists || actualValue != value {
+			return false
+		}
+	}
+	return true
+}
+
 func buildManagedProviderBinds(mounts []config.ManagedProviderHostMountConfig) []string {
 	out := make([]string, 0, len(mounts))
 	for _, mount := range mounts {
@@ -870,6 +896,7 @@ type dockerContainerInspect struct {
 	} `json:"State"`
 	Config struct {
 		Image  string            `json:"Image"`
+		Env    []string          `json:"Env"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 }

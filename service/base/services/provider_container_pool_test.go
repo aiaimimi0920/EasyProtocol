@@ -32,9 +32,11 @@ func TestProviderContainerPoolAdoptRemovesManagedChildWithMismatchedImage(t *tes
 				}{Running: true},
 				Config: struct {
 					Image  string            `json:"Image"`
+					Env    []string          `json:"Env"`
 					Labels map[string]string `json:"Labels"`
 				}{
 					Image: "ghcr.io/test/easy-protocol-python:old",
+					Env:   []string{"EASY_PROTOCOL_CHILD_SERVICE_NAME=PythonProtocol-001"},
 					Labels: map[string]string{
 						"easyprotocol.managed_child": "true",
 					},
@@ -73,6 +75,80 @@ func TestProviderContainerPoolAdoptRemovesManagedChildWithMismatchedImage(t *tes
 	}
 }
 
+func TestProviderContainerPoolAdoptRemovesManagedChildWithMismatchedEnvironment(t *testing.T) {
+	originalHealthWaiter := providerChildHealthWaiter
+	originalCapabilitiesFetcher := providerChildCapabilitiesFetcher
+	t.Cleanup(func() {
+		providerChildHealthWaiter = originalHealthWaiter
+		providerChildCapabilitiesFetcher = originalCapabilitiesFetcher
+	})
+	providerChildHealthWaiter = func(_ context.Context, _ *http.Client, _ string) error {
+		return nil
+	}
+	providerChildCapabilitiesFetcher = func(_ context.Context, _ *http.Client, _ string) ([]string, error) {
+		return []string{"codex.semantic.step"}, nil
+	}
+
+	docker := &fakeProviderContainerDocker{
+		inspects: map[string]dockerContainerInspect{
+			"easy-protocol-python-001": {
+				ID: "old-container",
+				State: struct {
+					Running bool `json:"Running"`
+				}{Running: true},
+				Config: struct {
+					Image  string            `json:"Image"`
+					Env    []string          `json:"Env"`
+					Labels map[string]string `json:"Labels"`
+				}{
+					Image: "ghcr.io/test/easy-protocol-python:new",
+					Env: []string{
+						"MAILBOX_SERVICE_API_KEY=mailbox-old",
+						"EASY_PROXY_API_KEY=proxy-old",
+						"EASY_PROTOCOL_CHILD_SERVICE_NAME=PythonProtocol-001",
+					},
+					Labels: map[string]string{
+						"easyprotocol.managed_child": "true",
+					},
+				},
+			},
+		},
+	}
+	family := &providerContainerFamily{
+		providerID:          "python",
+		language:            "python",
+		servicePrefix:       "PythonProtocol",
+		containerNamePrefix: "easy-protocol-python",
+		endpointHostPrefix:  "easy-protocol-python",
+		image:               "ghcr.io/test/easy-protocol-python:new",
+		port:                9100,
+		environment: map[string]string{
+			"MAILBOX_SERVICE_API_KEY": "mailbox-new",
+			"EASY_PROXY_API_KEY":      "proxy-new",
+		},
+		supportedOps:     []string{"codex.semantic.step"},
+		maxReplicas:      1,
+		nextReplicaIndex: 1,
+		children:         map[string]*providerContainerChild{},
+	}
+	pool := &providerContainerPool{
+		registry:   registry.New(),
+		docker:     docker,
+		httpClient: &http.Client{},
+	}
+
+	if err := pool.adoptExistingChildren(context.Background(), family); err != nil {
+		t.Fatalf("adopt existing children: %v", err)
+	}
+
+	if len(family.children) != 0 {
+		t.Fatalf("expected env-mismatched child not to be adopted, got %d child", len(family.children))
+	}
+	if len(docker.removed) != 1 || docker.removed[0] != "easy-protocol-python-001" {
+		t.Fatalf("expected env-mismatched managed child to be removed, got %#v", docker.removed)
+	}
+}
+
 func TestProviderContainerPoolSpawnAdoptsConflictingManagedChild(t *testing.T) {
 	originalHealthWaiter := providerChildHealthWaiter
 	originalCapabilitiesFetcher := providerChildCapabilitiesFetcher
@@ -97,9 +173,11 @@ func TestProviderContainerPoolSpawnAdoptsConflictingManagedChild(t *testing.T) {
 				}{Running: true},
 				Config: struct {
 					Image  string            `json:"Image"`
+					Env    []string          `json:"Env"`
 					Labels map[string]string `json:"Labels"`
 				}{
 					Image: "ghcr.io/test/easy-protocol-python:new",
+					Env:   []string{"EASY_PROTOCOL_CHILD_SERVICE_NAME=PythonProtocol-001"},
 					Labels: map[string]string{
 						"easyprotocol.managed_child": "true",
 					},

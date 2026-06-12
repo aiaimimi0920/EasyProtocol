@@ -58,6 +58,10 @@ class ScriptSmokeTests(unittest.TestCase):
                     "C:/runtime/team-local",
                     "-ProviderReleaseTag",
                     "providers-smoke",
+                    "-MailboxServiceApiKey",
+                    "mailbox-smoke",
+                    "-EasyProxyApiKey",
+                    "proxy-smoke",
                 ],
                 env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
             )
@@ -81,6 +85,10 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("C:/runtime/team-local", args)
             self.assertIn("-ProviderReleaseTag", args)
             self.assertIn("providers-smoke", args)
+            self.assertIn("-MailboxServiceApiKey", args)
+            self.assertIn("mailbox-smoke", args)
+            self.assertIn("-EasyProxyApiKey", args)
+            self.assertIn("proxy-smoke", args)
 
     def test_deploy_service_base_dispatches_deploy_ghcr_helper(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -109,14 +117,32 @@ class ScriptSmokeTests(unittest.TestCase):
                     "-ServiceEnvOutput",
                     str(rendered_runtime_env),
                     "-SkipPull",
+                    "-MailboxServiceApiKey",
+                    "mailbox-smoke",
+                    "-EasyProxyApiKey",
+                    "proxy-smoke",
                 ],
                 env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
             records = read_json_lines(capture_path)
-            self.assertEqual(len(records), 1)
-            record = records[0]
+            self.assertEqual(len(records), 2)
+
+            patch_record = records[0]
+            self.assertEqual(patch_record["FilePath"].lower(), "python")
+            patch_args = patch_record["Arguments"]
+            self.assertTrue(patch_args[0].lower().endswith("patch-rendered-service-config.py"))
+            self.assertIn("--config-path", patch_args)
+            self.assertIn(str(rendered_config), patch_args)
+            self.assertIn("--runtime-env-path", patch_args)
+            self.assertIn(str(rendered_runtime_env), patch_args)
+            self.assertIn("--mailbox-service-api-key", patch_args)
+            self.assertIn("mailbox-smoke", patch_args)
+            self.assertIn("--easy-proxy-api-key", patch_args)
+            self.assertIn("proxy-smoke", patch_args)
+
+            record = records[1]
             self.assertTrue(record["FilePath"].lower().endswith("deploy-ghcr-easy-protocol-service.ps1"))
             args = record["Arguments"]
             self.assertIn("-Image", args)
