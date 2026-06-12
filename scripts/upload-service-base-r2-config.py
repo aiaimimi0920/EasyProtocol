@@ -5,11 +5,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import boto3
+
+
+for logger_name in ("boto3", "botocore", "s3transfer", "urllib3"):
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def hash_hex(path: Path, algorithm: str) -> str:

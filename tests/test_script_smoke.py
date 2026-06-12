@@ -425,6 +425,20 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
+    def test_r2_helper_scripts_suppress_dependency_debug_logging(self):
+        script_paths = [
+            REPO_ROOT / "deploy" / "service" / "base" / "bootstrap-service-config.py",
+            REPO_ROOT / "scripts" / "upload-service-base-r2-config.py",
+        ]
+
+        for script_path in script_paths:
+            content = script_path.read_text(encoding="utf-8")
+            self.assertIn("import logging", content, msg=str(script_path))
+            self.assertIn('"botocore"', content, msg=str(script_path))
+            self.assertIn('"boto3"', content, msg=str(script_path))
+            self.assertIn('"urllib3"', content, msg=str(script_path))
+            self.assertIn("setLevel(logging.WARNING)", content, msg=str(script_path))
+
     def test_service_base_entrypoint_reapplies_local_overrides_after_import_sync(self):
         entrypoint_path = REPO_ROOT / "deploy" / "service" / "base" / "docker-entrypoint.sh"
         content = entrypoint_path.read_text(encoding="utf-8")
