@@ -63,6 +63,14 @@ def get_dict(mapping: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _first_non_blank(*values: Any) -> str:
+    for value in values:
+        text = str(value or "")
+        if text.strip():
+            return text
+    return ""
+
+
 def _normalize_replica_count(value: Any, *, default: int = 0) -> int:
     try:
         parsed = int(value)
@@ -275,17 +283,17 @@ def build_managed_provider_runtime(root_config: dict[str, Any]) -> dict[str, Any
         }
         if provider_key == "python":
             env_map = runtime["providers"][provider_key]["environment"]
-            env_map["MAILBOX_SERVICE_BASE_URL"] = str(
-                easy_email.get("baseUrl", env_map.get("MAILBOX_SERVICE_BASE_URL", "")) or ""
+            env_map["MAILBOX_SERVICE_BASE_URL"] = _first_non_blank(
+                easy_email.get("baseUrl"), env_map.get("MAILBOX_SERVICE_BASE_URL", "")
             )
-            env_map["MAILBOX_SERVICE_API_KEY"] = str(
-                easy_email.get("apiKey", env_map.get("MAILBOX_SERVICE_API_KEY", "")) or ""
+            env_map["MAILBOX_SERVICE_API_KEY"] = _first_non_blank(
+                easy_email.get("apiKey"), env_map.get("MAILBOX_SERVICE_API_KEY", "")
             )
-            env_map["EASY_PROXY_BASE_URL"] = str(
-                easy_proxy.get("baseUrl", env_map.get("EASY_PROXY_BASE_URL", "")) or ""
+            env_map["EASY_PROXY_BASE_URL"] = _first_non_blank(
+                easy_proxy.get("baseUrl"), env_map.get("EASY_PROXY_BASE_URL", "")
             )
-            env_map["EASY_PROXY_API_KEY"] = str(
-                easy_proxy.get("apiKey", env_map.get("EASY_PROXY_API_KEY", "")) or ""
+            env_map["EASY_PROXY_API_KEY"] = _first_non_blank(
+                easy_proxy.get("apiKey"), env_map.get("EASY_PROXY_API_KEY", "")
             )
             env_map["M2U_EASY_PROXY_MAX_ATTEMPTS"] = str(
                 easy_email.get("m2uEasyProxyMaxAttempts", env_map.get("M2U_EASY_PROXY_MAX_ATTEMPTS", 10))
@@ -355,10 +363,18 @@ def build_easy_stack_env(root_config: dict[str, Any]) -> dict[str, str]:
         or stack.get("pythonPrimaryPublishedPort")
         or 11003
     )
-    env["MAILBOX_SERVICE_BASE_URL"] = str(easy_email.get("baseUrl", env.get("MAILBOX_SERVICE_BASE_URL", "")) or "")
-    env["MAILBOX_SERVICE_API_KEY"] = str(easy_email.get("apiKey", env.get("MAILBOX_SERVICE_API_KEY", "")) or "")
-    env["EASY_PROXY_BASE_URL"] = str(easy_proxy.get("baseUrl", env.get("EASY_PROXY_BASE_URL", "")) or "")
-    env["EASY_PROXY_API_KEY"] = str(easy_proxy.get("apiKey", env.get("EASY_PROXY_API_KEY", "")) or "")
+    env["MAILBOX_SERVICE_BASE_URL"] = _first_non_blank(
+        easy_email.get("baseUrl"), env.get("MAILBOX_SERVICE_BASE_URL", "")
+    )
+    env["MAILBOX_SERVICE_API_KEY"] = _first_non_blank(
+        easy_email.get("apiKey"), env.get("MAILBOX_SERVICE_API_KEY", "")
+    )
+    env["EASY_PROXY_BASE_URL"] = _first_non_blank(
+        easy_proxy.get("baseUrl"), env.get("EASY_PROXY_BASE_URL", "")
+    )
+    env["EASY_PROXY_API_KEY"] = _first_non_blank(
+        easy_proxy.get("apiKey"), env.get("EASY_PROXY_API_KEY", "")
+    )
     env["EASY_EMAIL_RESET_STORE_ON_BOOT"] = str(easy_email.get("resetStoreOnBoot", False)).lower()
     env["M2U_EASY_PROXY_MAX_ATTEMPTS"] = str(easy_email.get("m2uEasyProxyMaxAttempts", 10))
     env["REGISTER_OUTPUT_DIR_HOST"] = str(host_mounts.get("registerOutputDirHost") or "")

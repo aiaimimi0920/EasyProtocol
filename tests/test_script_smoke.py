@@ -552,6 +552,46 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertEqual("/run/desktop/mnt/host/c/runtime/team-local", mounts["/shared/local-team-store"]["source"])
             self.assertFalse(mounts["/shared/local-team-store"]["read_only"])
 
+    def test_render_derived_configs_preserves_provider_dependency_keys_when_external_dependency_keys_are_blank(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root_config = Path(temp_dir) / "config.yaml"
+            temp_service_output = Path(temp_dir) / "service-config.yaml"
+            temp_stack_env = Path(temp_dir) / "stack.env"
+            payload = yaml.safe_load((REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8"))
+            python_env = payload["providers"]["python"]["containerEnvironment"]
+            python_env["MAILBOX_SERVICE_API_KEY"] = "mailbox-smoke"
+            python_env["EASY_PROXY_API_KEY"] = "proxy-smoke"
+            dependencies = payload["stack"]["easyProtocol"]["externalDependencies"]
+            dependencies["easyEmail"]["apiKey"] = ""
+            dependencies["easyProxy"]["apiKey"] = ""
+            temp_root_config.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    "python",
+                    str(REPO_ROOT / "scripts" / "render-derived-configs.py"),
+                    "--root-config",
+                    str(temp_root_config),
+                    "--service-output",
+                    str(temp_service_output),
+                    "--stack-env-output",
+                    str(temp_stack_env),
+                ],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
+            rendered = yaml.safe_load(temp_service_output.read_text(encoding="utf-8"))
+            python_runtime = rendered["managed_provider_runtime"]["providers"]["python"]
+            self.assertEqual("mailbox-smoke", python_runtime["environment"]["MAILBOX_SERVICE_API_KEY"])
+            self.assertEqual("proxy-smoke", python_runtime["environment"]["EASY_PROXY_API_KEY"])
+            env_lines = temp_stack_env.read_text(encoding="utf-8").splitlines()
+            self.assertIn("MAILBOX_SERVICE_API_KEY=mailbox-smoke", env_lines)
+            self.assertIn("EASY_PROXY_API_KEY=proxy-smoke", env_lines)
+
     def test_patch_rendered_service_config_preserves_imported_config_and_applies_local_overrides(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             rendered_config = Path(temp_dir) / "service-config.yaml"
