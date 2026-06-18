@@ -101,12 +101,12 @@ managed_provider_runtime:
         REGISTER_R2_PUBLIC_BASE_URL: ''
         M2U_EASY_PROXY_MAX_ATTEMPTS: '10'
       host_mounts:
-      - source: C:/EasyProtocol/register-output
+      - source: /run/desktop/mnt/host/c/EasyProtocol/register-output
         target: /shared/register-output
         read_only: false
-      - source: C:/Users/vmjcv/.cli-proxy-api/team
+      - source: /run/desktop/mnt/host/c/Users/vmjcv/.cli-proxy-api/team
         target: /shared/team-auth
         read_only: true
-      - source: C:/Users/vmjcv/.cli-proxy-api/team
+      - source: /run/desktop/mnt/host/c/Users/vmjcv/.cli-proxy-api/team
         target: /shared/local-team-store
         read_only: false

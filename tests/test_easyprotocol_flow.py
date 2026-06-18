@@ -24,6 +24,8 @@ from new_protocol_register.easyprotocol_flow import _update_team_expand_progress
 from new_protocol_register import easyprotocol_flow  # noqa: E402
 from new_protocol_register.magic import _classify_invite_error  # noqa: E402
 from new_protocol_register import protocol_chatgpt_login  # noqa: E402
+from new_protocol_register import protocol_account_availability  # noqa: E402
+from new_protocol_register import protocol_community_login  # noqa: E402
 from new_protocol_register import protocol_oauth  # noqa: E402
 from new_protocol_register import protocol_platform_org  # noqa: E402
 from new_protocol_register import protocol_phone_verification  # noqa: E402
@@ -489,6 +491,586 @@ class EasyProtocolFlowTests(unittest.TestCase):
             developer_persona="student",
         )
 
+    def test_login_openai_community_dispatch_uses_easybrowser_login_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "small-success.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "community-user@example.com",
+                        "password": "test-password",
+                        "mailboxRef": "cloudflare_temp_email:community-user@example.com",
+                        "mailboxSessionId": "mailbox-session-1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            captured: dict[str, object] = {}
+
+            def _fake_run_easybrowser_login_flow(**kwargs: object) -> dict[str, object]:
+                captured.update(kwargs)
+                return {
+                    "ok": True,
+                    "target_url": "https://community.openai.com/",
+                    "email": kwargs.get("email"),
+                    "mailbox_ref": kwargs.get("mailbox_ref"),
+                    "session_id": "browser-session-1",
+                    "task_id": "task-community-1",
+                    "status": "completed",
+                }
+
+            with mock.patch.object(
+                protocol_community_login,
+                "run_easybrowser_openai_web_login_flow",
+                side_effect=_fake_run_easybrowser_login_flow,
+            ):
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="login_openai_community",
+                    step_input={
+                        "source_path": str(source_path),
+                        "proxy_url": "http://easy-proxy.local:25001",
+                        "startup_url": "https://community.openai.com/",
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("community_login_completed", result["status"])
+        self.assertEqual("community-user@example.com", result["email"])
+        self.assertEqual("https://community.openai.com/", result["targetUrl"])
+        self.assertEqual("community-user@example.com", captured["email"])
+        self.assertEqual("test-password", captured["password"])
+        self.assertEqual("cloudflare_temp_email:community-user@example.com", captured["mailbox_ref"])
+        self.assertEqual("mailbox-session-1", captured["mailbox_session_id"])
+        self.assertEqual("http://easy-proxy.local:25001", captured["proxy_url"])
+        self.assertEqual("https://community.openai.com/", captured["startup_url"])
+
+    def test_login_openai_community_rejects_non_community_target_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "small-success.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "community-user@example.com",
+                        "password": "test-password",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                protocol_community_login,
+                "run_easybrowser_openai_web_login_flow",
+                return_value={
+                    "ok": True,
+                    "target_url": "https://auth.openai.com/api/accounts/authorize",
+                    "status": "completed",
+                },
+            ):
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="login_openai_community",
+                    step_input={
+                        "source_path": str(source_path),
+                        "startup_url": "https://community.openai.com/",
+                    },
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("community_login_target_mismatch", result["status"])
+        self.assertEqual("https://auth.openai.com/api/accounts/authorize", result["targetUrl"])
+
+    def test_account_availability_audit_dispatch_recovers_mailbox_and_classifies_http_login_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            loginable_path = Path(tmp_dir) / "loginable.json"
+            deleted_path = Path(tmp_dir) / "deleted.json"
+            loginable_path.write_text(
+                json.dumps(
+                    {
+                        "email": "ok@example.com",
+                        "password": "ok-password",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            deleted_path.write_text(
+                json.dumps(
+                    {
+                        "email": "deleted@example.com",
+                        "password": "deleted-password",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            login_calls: list[dict[str, object]] = []
+
+            def _fake_recover_mailbox_by_email(**kwargs: object) -> dict[str, object]:
+                email = str(kwargs.get("email_address") or "")
+                self.assertEqual(
+                    {
+                        "providerTypeKey": "cloudflare_temp_email",
+                        "providerInstanceId": "cloudflare_temp_email_shared_default",
+                    },
+                    kwargs.get("recovery_data_credential"),
+                )
+                return {
+                    "recovered": True,
+                    "session": {
+                        "id": f"session-{email}",
+                        "emailAddress": email,
+                        "mailboxRef": f"cloudflare_temp_email:{email}",
+                        "providerTypeKey": "cloudflare_temp_email",
+                    },
+                }
+
+            def _fake_run_protocol_chatgpt_login_init_from_path(**kwargs: object) -> dict[str, object]:
+                login_calls.append(dict(kwargs))
+                source_path = str(kwargs.get("source_path") or "")
+                if source_path.endswith("deleted.json"):
+                    raise protocol_chatgpt_login.ProtocolRuntimeError(
+                        "chatgpt_login_otp_validate_failed status=403 body=You do not have an account because it has been deleted or deactivated",
+                        stage="stage_otp_validate",
+                        detail="chatgpt_login_email_otp_validate",
+                        category="flow_error",
+                    )
+                return {
+                    "ok": True,
+                    "status": "completed",
+                    "finalUrl": "https://chatgpt.com/",
+                }
+
+            with mock.patch.object(
+                protocol_account_availability,
+                "recover_mailbox_by_email",
+                side_effect=_fake_recover_mailbox_by_email,
+            ), mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+                side_effect=_fake_run_protocol_chatgpt_login_init_from_path,
+            ):
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(loginable_path),
+                                "email": "ok@example.com",
+                                "recovery_data_credential": {
+                                    "providerTypeKey": "cloudflare_temp_email",
+                                    "providerInstanceId": "cloudflare_temp_email_shared_default",
+                                },
+                            },
+                            {
+                                "source_path": str(deleted_path),
+                                "email": "deleted@example.com",
+                                "recovery_data_credential": {
+                                    "providerTypeKey": "cloudflare_temp_email",
+                                    "providerInstanceId": "cloudflare_temp_email_shared_default",
+                                },
+                            },
+                        ],
+                        "proxy_url": "http://easy-proxy.local:25001",
+                        "login_entry_url": "https://chatgpt.com/",
+                        "recover_mailbox": True,
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(
+            ["login_succeeded", "deleted_confirmed"],
+            [item["status"] for item in result["results"]],
+        )
+        self.assertEqual("session-ok@example.com", login_calls[0]["mailbox_session_id"])
+        self.assertEqual("cloudflare_temp_email:ok@example.com", login_calls[0]["mailbox_ref"])
+        self.assertEqual("http://easy-proxy.local:25001", login_calls[0]["explicit_proxy"])
+
+    def test_account_availability_audit_dispatch_parses_recover_mailbox_false_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "seed.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "seed@example.com",
+                        "password": "secret",
+                        "recoveryDataCredential": {
+                            "emailAddress": "seed@example.com",
+                            "providerTypeKey": "cloudflare_temp_email",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                protocol_account_availability,
+                "recover_mailbox_by_email",
+            ) as recover_mailbox_by_email, mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+                return_value={"ok": True, "status": "completed", "finalUrl": "https://chatgpt.com/"},
+            ):
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(source_path),
+                                "email": "seed@example.com",
+                            }
+                        ],
+                        "recover_mailbox": "false",
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        recover_mailbox_by_email.assert_not_called()
+
+    def test_account_availability_audit_prefers_refresh_token_validation_before_http_login(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "refresh-seed.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "refresh-ok@example.com",
+                        "password": "secret",
+                        "refresh_token": "refresh-token-1",
+                        "access_token": "access-token-1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                protocol_account_availability,
+                "_perform_refresh_token_exchange",
+                return_value={"access_token": "new-access-token"},
+            ) as refresh_exchange, mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+            ) as run_login:
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(source_path),
+                                "email": "refresh-ok@example.com",
+                            }
+                        ],
+                        "proxy_url": "http://easy-proxy.local:25001",
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("login_succeeded", result["results"][0]["status"])
+        self.assertEqual("refresh_token_valid", result["results"][0]["detail"])
+        refresh_exchange.assert_called_once()
+        run_login.assert_not_called()
+
+    def test_account_availability_audit_falls_back_to_http_login_and_classifies_deleted_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "deleted-seed.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "deleted@example.com",
+                        "password": "secret",
+                        "mailboxRef": "cloudflare_temp_email:deleted@example.com",
+                        "mailboxSessionId": "mailbox-session-deleted",
+                        "chatgptLoginDetails": {
+                            "clientBootstrap": {
+                                "accessToken": "bootstrap-access-token",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def _fake_recover_mailbox_by_email(**_: object) -> dict[str, object]:
+                return {
+                    "recovered": True,
+                    "session": {
+                        "id": "mailbox-session-deleted-recovered",
+                        "mailboxRef": "cloudflare_temp_email:deleted@example.com",
+                    },
+                }
+
+            with mock.patch.object(
+                protocol_account_availability,
+                "_perform_refresh_token_exchange",
+                side_effect=RuntimeError("team_refresh_token_required"),
+            ) as refresh_exchange, mock.patch.object(
+                protocol_account_availability,
+                "recover_mailbox_by_email",
+                side_effect=_fake_recover_mailbox_by_email,
+            ) as recover_mailbox_by_email, mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+                side_effect=protocol_chatgpt_login.ProtocolRuntimeError(
+                    "chatgpt_login_otp_validate_failed status=403 body=You do not have an account because it has been deleted or deactivated",
+                    stage="stage_otp_validate",
+                    detail="chatgpt_login_email_otp_validate",
+                    category="flow_error",
+                ),
+            ) as run_login:
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(source_path),
+                                "email": "deleted@example.com",
+                            }
+                        ],
+                        "proxy_url": "http://easy-proxy.local:25001",
+                        "recover_mailbox": True,
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("deleted_confirmed", result["results"][0]["status"])
+        self.assertIn("deleted or deactivated", result["results"][0]["detail"])
+        refresh_exchange.assert_not_called()
+        recover_mailbox_by_email.assert_called_once()
+        run_login.assert_called_once()
+
+    def test_recover_mailbox_by_email_posts_recovery_data_credential(self) -> None:
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_post_json(path: str, payload: dict[str, object]) -> dict[str, object]:
+            calls.append((path, payload))
+            return {"result": {"recovered": True}}
+
+        recovery_data_credential = {
+            "emailAddress": "recoverable@example.com",
+            "providerTypeKey": "cloudflare_temp_email",
+            "providerInstanceId": "cloudflare_temp_email_shared_default",
+            "hostId": "python-register-orchestration",
+            "opaque": "keep-this",
+        }
+
+        with mock.patch.object(easy_email_client, "_post_json", side_effect=_fake_post_json):
+            result = easy_email_client.recover_mailbox_by_email(
+                email_address="recoverable@example.com",
+                provider_type_key="cloudflare_temp_email",
+                host_id="python-register-orchestration",
+                recovery_data_credential=recovery_data_credential,
+            )
+
+        self.assertTrue(result["recovered"])
+        self.assertEqual("/mail/mailboxes/recover-by-email", calls[0][0])
+        self.assertEqual(
+            {
+                "emailAddress": "recoverable@example.com",
+                "providerTypeKey": "cloudflare_temp_email",
+                "hostId": "python-register-orchestration",
+                "recoveryDataCredential": recovery_data_credential,
+            },
+            calls[0][1],
+        )
+
+    def test_openai_community_easybrowser_client_executes_login_flow_and_releases_session(self) -> None:
+        post_calls: list[tuple[str, dict[str, object]]] = []
+        get_calls: list[str] = []
+
+        def _fake_post_json(_session: object, _base_url: str, path: str, payload: dict[str, object]) -> dict[str, object]:
+            post_calls.append((path, payload))
+            if path == "/v1/browser/sessions/acquire":
+                return {
+                    "success": True,
+                    "data": {
+                        "session": {
+                            "session_id": "browser-session-1",
+                        }
+                    },
+                }
+            if path == "/v1/browser/sessions/browser-session-1/flows/execute":
+                return {
+                    "success": True,
+                    "data": {
+                        "task_id": "task-community-1",
+                    },
+                }
+            if path == "/v1/browser/sessions/browser-session-1/release":
+                return {
+                    "success": True,
+                    "data": {},
+                }
+            raise AssertionError(path)
+
+        def _fake_get_json(_session: object, _base_url: str, path: str) -> dict[str, object]:
+            get_calls.append(path)
+            self.assertEqual("/v1/tasks/task-community-1", path)
+            return {
+                "success": True,
+                "data": {
+                    "state": "succeeded",
+                    "result": {
+                        "artifacts": {
+                            "target_url": "https://community.openai.com/",
+                        }
+                    },
+                },
+            }
+
+        with mock.patch.object(protocol_community_login, "_post_json", side_effect=_fake_post_json), mock.patch.object(
+            protocol_community_login,
+            "_get_json",
+            side_effect=_fake_get_json,
+        ), mock.patch.object(protocol_community_login.requests, "Session", return_value=object()):
+            result = protocol_community_login.run_easybrowser_openai_web_login_flow(
+                email="community-user@example.com",
+                password="test-password",
+                mailbox_ref="cloudflare_temp_email:community-user@example.com",
+                mailbox_session_id="mailbox-session-1",
+                proxy_url="http://easy-proxy.local:25001",
+                startup_url="https://community.openai.com/",
+                easybrowser_base_url="http://easy-browser.local:8080",
+                timeout_seconds=3,
+                poll_interval_seconds=0.1,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("https://community.openai.com/", result["target_url"])
+        self.assertEqual(["/v1/tasks/task-community-1"], get_calls)
+        self.assertEqual(
+            [
+                "/v1/browser/sessions/acquire",
+                "/v1/browser/sessions/browser-session-1/flows/execute",
+                "/v1/browser/sessions/browser-session-1/release",
+            ],
+            [path for path, _payload in post_calls],
+        )
+        execute_payload = post_calls[1][1]
+        acquire_payload = post_calls[0][1]
+        self.assertEqual("direct", acquire_payload["mode"])
+        self.assertEqual("chrome", acquire_payload["provider_hint"])
+        self.assertEqual("chrome", acquire_payload["browser_backend"])
+        self.assertEqual("login", execute_payload["flow_type"])
+        step_payload = execute_payload["steps"][0]
+        self.assertEqual("openai_web_login", step_payload["step_type"])
+        self.assertEqual("https://community.openai.com/", step_payload["input"]["startup_url"])
+        self.assertEqual("community-user@example.com", step_payload["input"]["auth"]["email"])
+        self.assertEqual("mailbox-session-1", step_payload["input"]["auth"]["mailbox_session_id"])
+
+    def test_openai_community_easybrowser_client_allows_isolated_backend_override(self) -> None:
+        post_calls: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_post_json(_session: object, _base_url: str, path: str, payload: dict[str, object]) -> dict[str, object]:
+            post_calls.append((path, payload))
+            if path == "/v1/browser/sessions/acquire":
+                return {"success": True, "data": {"session": {"session_id": "browser-session-1"}}}
+            if path == "/v1/browser/sessions/browser-session-1/flows/execute":
+                return {"success": True, "data": {"task_id": "task-community-1"}}
+            if path == "/v1/browser/sessions/browser-session-1/release":
+                return {"success": True, "data": {}}
+            raise AssertionError(path)
+
+        def _fake_get_json(_session: object, _base_url: str, path: str) -> dict[str, object]:
+            self.assertEqual("/v1/tasks/task-community-1", path)
+            return {
+                "success": True,
+                "data": {
+                    "state": "succeeded",
+                    "result": {"artifacts": {"target_url": "https://community.openai.com/"}},
+                },
+            }
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_COMMUNITY_BROWSER_PROVIDER_HINT": "camoufox",
+                "OPENAI_COMMUNITY_BROWSER_BACKEND": "camoufox",
+            },
+        ), mock.patch.object(protocol_community_login, "_post_json", side_effect=_fake_post_json), mock.patch.object(
+            protocol_community_login,
+            "_get_json",
+            side_effect=_fake_get_json,
+        ), mock.patch.object(protocol_community_login.requests, "Session", return_value=object()):
+            result = protocol_community_login.run_easybrowser_openai_web_login_flow(
+                email="community-user@example.com",
+                password="test-password",
+                mailbox_ref="cloudflare_temp_email:community-user@example.com",
+                mailbox_session_id="mailbox-session-1",
+                proxy_url="http://easy-proxy.local:25001",
+                startup_url="https://community.openai.com/",
+                easybrowser_base_url="http://easy-browser.local:8080",
+                timeout_seconds=3,
+                poll_interval_seconds=0.1,
+            )
+
+        self.assertTrue(result["ok"])
+        acquire_payload = post_calls[0][1]
+        self.assertEqual("camoufox", acquire_payload["provider_hint"])
+        self.assertEqual("camoufox", acquire_payload["browser_backend"])
+
+    def test_openai_community_easybrowser_client_releases_session_after_failed_task(self) -> None:
+        post_paths: list[str] = []
+
+        def _fake_post_json(_session: object, _base_url: str, path: str, payload: dict[str, object]) -> dict[str, object]:
+            post_paths.append(path)
+            if path == "/v1/browser/sessions/acquire":
+                return {
+                    "success": True,
+                    "data": {
+                        "session": {
+                            "session_id": "browser-session-1",
+                        }
+                    },
+                }
+            if path == "/v1/browser/sessions/browser-session-1/flows/execute":
+                return {
+                    "success": True,
+                    "data": {
+                        "task_id": "task-community-1",
+                    },
+                }
+            if path == "/v1/browser/sessions/browser-session-1/release":
+                return {
+                    "success": True,
+                    "data": {},
+                }
+            raise AssertionError(path)
+
+        def _fake_get_json(_session: object, _base_url: str, path: str) -> dict[str, object]:
+            self.assertEqual("/v1/tasks/task-community-1", path)
+            return {
+                "success": True,
+                "data": {
+                    "state": "failed",
+                    "error": {
+                        "code": "auth_challenge",
+                        "message": "Cloudflare challenge blocked login",
+                    },
+                    "result": {
+                        "artifacts": {
+                            "target_url": "https://auth.openai.com/api/accounts/authorize",
+                        }
+                    },
+                },
+            }
+
+        with mock.patch.object(protocol_community_login, "_post_json", side_effect=_fake_post_json), mock.patch.object(
+            protocol_community_login,
+            "_get_json",
+            side_effect=_fake_get_json,
+        ), mock.patch.object(protocol_community_login.requests, "Session", return_value=object()):
+            result = protocol_community_login.run_easybrowser_openai_web_login_flow(
+                email="community-user@example.com",
+                password="test-password",
+                mailbox_ref="cloudflare_temp_email:community-user@example.com",
+                mailbox_session_id="mailbox-session-1",
+                proxy_url="http://easy-proxy.local:25001",
+                startup_url="https://community.openai.com/",
+                easybrowser_base_url="http://easy-browser.local:8080",
+                timeout_seconds=3,
+                poll_interval_seconds=0.1,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("auth_challenge", result["status"])
+        self.assertEqual("https://auth.openai.com/api/accounts/authorize", result["target_url"])
+        self.assertEqual("/v1/browser/sessions/browser-session-1/release", post_paths[-1])
+
     def test_chatgpt_login_details_merge_preserves_existing_oauth_tokens(self) -> None:
         details = protocol_chatgpt_login._merge_chatgpt_login_details(
             seed_payload={
@@ -522,34 +1104,40 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual(2, details["networkAttempt"])
 
     def test_obtain_team_mother_oauth_force_email_auth_skips_refresh(self) -> None:
-        with mock.patch.object(
-            easyprotocol_flow,
-            "load_json_payload",
-            return_value={
-                "email": "mother@example.com",
-                "refresh_token": "rt_demo",
-            },
-        ), mock.patch.object(
-            easyprotocol_flow,
-            "refresh_team_auth_once",
-        ) as refresh_team_auth_once, mock.patch.object(
-            easyprotocol_flow,
-            "run_protocol_oauth_from_path",
-            return_value=SimpleNamespace(
-                auth={"email": "mother@example.com", "user_id": "user_123"},
-                email="mother@example.com",
-                account_id="acct_123",
-                storage_path="/tmp/codex-123.json",
-            ),
-        ) as run_protocol_oauth_from_path:
-            result = easyprotocol_flow.dispatch_easyprotocol_step(
-                step_type="obtain_team_mother_oauth",
-                step_input={
-                    "source_path": "C:/tmp/mother.json",
-                    "output_dir": "C:/tmp/out",
-                    "force_email_auth": True,
-                },
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "mother.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "mother@example.com",
+                        "refresh_token": "rt_demo",
+                    }
+                ),
+                encoding="utf-8",
             )
+            output_dir = tmp_path / "out"
+            with mock.patch.object(
+                easyprotocol_flow,
+                "refresh_team_auth_once",
+            ) as refresh_team_auth_once, mock.patch.object(
+                easyprotocol_flow,
+                "run_protocol_oauth_from_path",
+                return_value=SimpleNamespace(
+                    auth={"email": "mother@example.com", "user_id": "user_123"},
+                    email="mother@example.com",
+                    account_id="acct_123",
+                    storage_path="/tmp/codex-123.json",
+                ),
+            ) as run_protocol_oauth_from_path:
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="obtain_team_mother_oauth",
+                    step_input={
+                        "source_path": str(source_path),
+                        "output_dir": str(output_dir),
+                        "force_email_auth": True,
+                    },
+                )
         refresh_team_auth_once.assert_not_called()
         run_protocol_oauth_from_path.assert_called_once()
         self.assertEqual("email", result["authMode"])

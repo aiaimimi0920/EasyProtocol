@@ -33,7 +33,9 @@ if __package__ in (None, ""):
     )
     from object_storage.r2_upload import upload_file_to_r2
     from others.storage import load_json_payload
+    from protocol_account_availability import run_protocol_account_availability_audit
     from protocol_chatgpt_login import run_protocol_chatgpt_login_init_from_path
+    from protocol_community_login import run_protocol_community_login_from_path
     from protocol_oauth import run_protocol_oauth_from_path
     from protocol_phone_verification import (
         build_phone_verification_required_payload,
@@ -59,7 +61,9 @@ else:
     )
     from object_storage.r2_upload import upload_file_to_r2
     from .others.storage import load_json_payload
+    from .protocol_account_availability import run_protocol_account_availability_audit
     from .protocol_chatgpt_login import run_protocol_chatgpt_login_init_from_path
+    from .protocol_community_login import run_protocol_community_login_from_path
     from .protocol_oauth import run_protocol_oauth_from_path
     from .protocol_phone_verification import (
         build_phone_verification_required_payload,
@@ -102,6 +106,16 @@ def _extract_invite_id(payload: Any) -> str:
                 if value:
                     return value
     return ""
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    return text in {"1", "true", "yes", "on"}
+
 
 def _write_team_flow_update(*, source_path: Path, updater: Any) -> dict[str, Any]:
     payload = load_json_payload(source_path)
@@ -446,6 +460,24 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
             explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
             mailbox_ref=str(step_input.get("mailbox_ref") or "").strip() or None,
             mailbox_session_id=str(step_input.get("mailbox_session_id") or "").strip() or None,
+        )
+
+    if normalized_step_type == "login_openai_community":
+        return run_protocol_community_login_from_path(
+            source_path=str(step_input.get("source_path") or "").strip(),
+            explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
+            startup_url=str(step_input.get("startup_url") or "").strip() or None,
+            success_url_prefix=str(step_input.get("success_url_prefix") or "").strip() or None,
+            mailbox_ref=str(step_input.get("mailbox_ref") or "").strip() or None,
+            mailbox_session_id=str(step_input.get("mailbox_session_id") or "").strip() or None,
+        )
+
+    if normalized_step_type == "audit_openai_account_availability":
+        return run_protocol_account_availability_audit(
+            targets=step_input.get("targets"),
+            explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
+            login_entry_url=str(step_input.get("login_entry_url") or "").strip() or None,
+            recover_mailbox=_as_bool(step_input.get("recover_mailbox"), True),
         )
 
     if normalized_step_type == "invite_codex_member":

@@ -255,6 +255,7 @@ def _parse_mail_timestamp(value: str) -> int:
     if not text:
         return 0
     normalized = text.replace("Z", "+00:00")
+    normalized = re.sub(r"(\.\d{6})\d+([+-]\d{2}:\d{2})$", r"\1\2", normalized)
     try:
         dt = datetime.fromisoformat(normalized)
     except Exception:
@@ -744,6 +745,7 @@ def recover_mailbox_by_email(
     email_address: str,
     provider_type_key: str = "",
     host_id: str = "",
+    recovery_data_credential: dict | None = None,
 ) -> dict:
     normalized_email = _normalize_requested_email_address(email_address)
     if not normalized_email:
@@ -758,6 +760,8 @@ def recover_mailbox_by_email(
         payload["providerTypeKey"] = normalized_provider_type_key
     if normalized_host_id:
         payload["hostId"] = normalized_host_id
+    if isinstance(recovery_data_credential, dict) and recovery_data_credential:
+        payload["recoveryDataCredential"] = dict(recovery_data_credential)
     return _post_json("/mail/mailboxes/recover-by-email", payload).get("result") or {
         "recovered": False,
         "strategy": "not_supported",
