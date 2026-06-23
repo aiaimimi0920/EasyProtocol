@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import uuid
 import time
@@ -42,6 +43,7 @@ else:
 
 
 DEFAULT_CHATGPT_URL = "https://chatgpt.com/"
+DEFAULT_ACCOUNT_AUDIT_TIMEOUT_SECONDS = 1500.0
 DELETED_MARKERS = (
     "account_deactivated",
     "account has been deleted or deactivated",
@@ -66,6 +68,52 @@ def _as_bool(value: Any, default: bool = False) -> bool:
     if not text:
         return default
     return text in {"1", "true", "yes", "on"}
+
+
+def _as_positive_float(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_account_audit_timeout_seconds(value: Any = None) -> float:
+    explicit = _as_positive_float(value)
+    if explicit is not None:
+        return explicit
+    env_value = _as_positive_float(os.environ.get("PYTHON_PROTOCOL_ACCOUNT_AUDIT_TIMEOUT_SECONDS"))
+    if env_value is not None:
+        return env_value
+    return DEFAULT_ACCOUNT_AUDIT_TIMEOUT_SECONDS
+
+
+def _remaining_account_audit_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _timeout_result(
+    *,
+    target: dict[str, Any],
+    email: str,
+    detail: str = "account_audit_timeout_exceeded",
+) -> dict[str, Any]:
+    return _result_payload(
+        target=target,
+        email=email,
+        status="inconclusive",
+        detail=detail,
+        browser={
+            "ok": False,
+            "status": "timeout",
+            "detail": detail,
+        },
+    )
 
 
 def _nested_map(value: Any, *path: str) -> dict[str, Any]:
@@ -341,6 +389,7 @@ def _run_http_login_validation(
     payload: dict[str, Any],
     mailbox_context: dict[str, Any],
     explicit_proxy: str | None,
+    timeout_seconds: float | None = None,
 ) -> tuple[str, str, dict[str, Any]]:
     temp_path = Path(tempfile.gettempdir()) / f"account-audit-{uuid.uuid4().hex[:8]}-{source_path.name}"
     temp_payload = dict(payload)
@@ -353,6 +402,7 @@ def _run_http_login_validation(
             explicit_proxy=explicit_proxy,
             mailbox_ref=_first_text(mailbox_context.get("mailbox_ref")) or None,
             mailbox_session_id=_first_text(mailbox_context.get("mailbox_session_id")) or None,
+            timeout_seconds=timeout_seconds,
         )
         return "login_succeeded", "http_login_succeeded", result if isinstance(result, dict) else {}
     finally:
@@ -368,6 +418,7 @@ def run_protocol_account_availability_audit(
     explicit_proxy: str | None = None,
     login_entry_url: str | None = None,
     recover_mailbox: bool = True,
+    timeout_seconds: Any = None,
 ) -> dict[str, Any]:
     if not isinstance(targets, list):
         return {
@@ -377,6 +428,8 @@ def run_protocol_account_availability_audit(
             "results": [],
         }
     startup_url = str(login_entry_url or "").strip() or DEFAULT_CHATGPT_URL
+    audit_timeout_seconds = _resolve_account_audit_timeout_seconds(timeout_seconds)
+    deadline = time.monotonic() + audit_timeout_seconds if audit_timeout_seconds > 0 else None
     results: list[dict[str, Any]] = []
     counts = {
         "login_succeeded": 0,
@@ -411,6 +464,11 @@ def run_protocol_account_availability_audit(
                 detail="account_email_missing",
             )
             results.append(result)
+            counts["inconclusive"] += 1
+            continue
+        remaining_before_target = _remaining_account_audit_seconds(deadline)
+        if remaining_before_target is not None and remaining_before_target <= 0:
+            results.append(_timeout_result(target=target, email=email))
             counts["inconclusive"] += 1
             continue
         payload_terminal = _terminal_status_from_payload(payload)
@@ -484,12 +542,18 @@ def run_protocol_account_availability_audit(
             results.append(result)
             counts["inconclusive"] += 1
             continue
+        remaining_before_login = _remaining_account_audit_seconds(deadline)
+        if remaining_before_login is not None and remaining_before_login <= 0:
+            results.append(_timeout_result(target=target, email=email))
+            counts["inconclusive"] += 1
+            continue
         try:
             status, detail, protocol_result = _run_http_login_validation(
                 source_path=Path(source_path_text).resolve(),
                 payload=payload,
                 mailbox_context=mailbox_context,
                 explicit_proxy=explicit_proxy,
+                timeout_seconds=remaining_before_login,
             )
             browser = {
                 "ok": status == "login_succeeded",

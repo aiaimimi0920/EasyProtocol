@@ -91,6 +91,66 @@ def _chatgpt_login_network_error_is_retryable(exc: BaseException) -> bool:
     return any(marker in text for marker in retry_markers)
 
 
+def _coerce_positive_timeout_seconds(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = float(text)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _deadline_from_timeout_seconds(timeout_seconds: Any) -> float | None:
+    parsed = _coerce_positive_timeout_seconds(timeout_seconds)
+    if parsed is None:
+        return None
+    return time.monotonic() + parsed
+
+
+def _remaining_deadline_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
+def _raise_if_login_deadline_exceeded(deadline: float | None) -> None:
+    remaining = _remaining_deadline_seconds(deadline)
+    if remaining is not None and remaining <= 0:
+        raise ProtocolRuntimeError(
+            "chatgpt_login_timeout_exceeded",
+            stage="stage_auth_continue",
+            detail="chatgpt_login_timeout_exceeded",
+            category="timeout_error",
+        )
+
+
+def _request_timeout_for_deadline(deadline: float | None, default_timeout: int) -> int:
+    _raise_if_login_deadline_exceeded(deadline)
+    remaining = _remaining_deadline_seconds(deadline)
+    if remaining is None:
+        return max(1, int(default_timeout))
+    return max(1, min(int(default_timeout), int(remaining)))
+
+
+def _otp_timeout_for_budget(timeout_seconds: Any) -> int:
+    try:
+        configured = max(
+            60,
+            int(
+                (os.environ.get("OTP_TIMEOUT_SECONDS") or str(DEFAULT_OTP_TIMEOUT_SECONDS)).strip()
+                or str(DEFAULT_OTP_TIMEOUT_SECONDS)
+            ),
+        )
+    except Exception:
+        configured = DEFAULT_OTP_TIMEOUT_SECONDS
+    budget = _coerce_positive_timeout_seconds(timeout_seconds)
+    if budget is None:
+        return configured
+    return max(1, min(configured, int(budget)))
+
+
 def _chatgpt_login_request(
     session: requests.Session,
     method: str,
@@ -98,10 +158,18 @@ def _chatgpt_login_request(
     *,
     explicit_proxy: str | None,
     request_label: str,
+    deadline: float | None = None,
     **kwargs: Any,
 ) -> Any:
     last_exc: BaseException | None = None
+    base_timeout = kwargs.pop("timeout", None)
+    default_timeout = int(_coerce_positive_timeout_seconds(base_timeout) or 30)
     for attempt in range(1, 3):
+        request_kwargs = dict(kwargs)
+        if deadline is not None:
+            request_kwargs["timeout"] = _request_timeout_for_deadline(deadline, default_timeout)
+        elif base_timeout is not None:
+            request_kwargs["timeout"] = base_timeout
         try:
             return _session_request(
                 session,
@@ -109,7 +177,7 @@ def _chatgpt_login_request(
                 url,
                 explicit_proxy=explicit_proxy,
                 request_label=request_label,
-                **kwargs,
+                **request_kwargs,
             )
         except Exception as exc:
             last_exc = exc
@@ -230,20 +298,20 @@ def _load_accounts_with_personal_preference(
     return entries, personal_entry
 
 
-def _wait_for_email_otp(*, mailbox_ref: str, mailbox_session_id: str, min_mail_id: int) -> str:
+def _wait_for_email_otp(
+    *,
+    mailbox_ref: str,
+    mailbox_session_id: str,
+    min_mail_id: int,
+    timeout_seconds: Any = None,
+) -> str:
     try:
         code = wait_openai_code(
             mailbox_ref=mailbox_ref,
             session_id=mailbox_session_id,
             mailcreate_base_url=MAILCREATE_BASE_URL,
             mailcreate_custom_auth=MAILCREATE_CUSTOM_AUTH,
-            timeout_seconds=max(
-                60,
-                int(
-                    (os.environ.get("OTP_TIMEOUT_SECONDS") or str(DEFAULT_OTP_TIMEOUT_SECONDS)).strip()
-                    or str(DEFAULT_OTP_TIMEOUT_SECONDS)
-                ),
-            ),
+            timeout_seconds=_otp_timeout_for_budget(timeout_seconds),
             min_mail_id=min_mail_id,
         )
     except Exception as exc:
@@ -269,6 +337,7 @@ def _complete_chatgpt_nextauth_callback(
     session: requests.Session,
     callback_url: str,
     explicit_proxy: str | None,
+    deadline: float | None = None,
 ) -> Any:
     response = _chatgpt_login_request(
         session,
@@ -276,6 +345,7 @@ def _complete_chatgpt_nextauth_callback(
         callback_url,
         explicit_proxy=explicit_proxy,
         request_label="chatgpt-nextauth-callback",
+        deadline=deadline,
         timeout=20,
         headers={
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -303,6 +373,7 @@ def _bootstrap_chatgpt_login_with_redirect(
     session: requests.Session,
     device_id: str,
     explicit_proxy: str | None,
+    deadline: float | None = None,
 ) -> str:
     login_response = _chatgpt_login_request(
         session,
@@ -313,6 +384,7 @@ def _bootstrap_chatgpt_login_with_redirect(
         headers={
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
+        deadline=deadline,
         timeout=20,
     )
     if int(getattr(login_response, "status_code", 0) or 0) >= 400:
@@ -334,6 +406,7 @@ def _bootstrap_chatgpt_login_with_redirect(
             "accept": "application/json",
             "referer": CHATGPT_LOGIN_URL,
         },
+        deadline=deadline,
         timeout=20,
     )
     if int(getattr(csrf_response, "status_code", 0) or 0) != 200:
@@ -386,6 +459,7 @@ def _bootstrap_chatgpt_login_with_redirect(
                 "json": "true",
             }
         ),
+        deadline=deadline,
         timeout=20,
     )
     if int(getattr(signin_response, "status_code", 0) or 0) != 200:
@@ -447,6 +521,7 @@ def run_protocol_chatgpt_login_init_from_path(
     explicit_proxy: str | None = None,
     mailbox_ref: str | None = None,
     mailbox_session_id: str | None = None,
+    timeout_seconds: Any = None,
 ) -> dict[str, Any]:
     seed_path = Path(source_path).resolve()
     seed_payload = load_json_payload(seed_path)
@@ -490,10 +565,12 @@ def run_protocol_chatgpt_login_init_from_path(
     verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
     max_network_attempts = 2
     last_exc: BaseException | None = None
+    deadline = _deadline_from_timeout_seconds(timeout_seconds)
     for network_attempt in range(1, max_network_attempts + 1):
+        _raise_if_login_deadline_exceeded(deadline)
         session = requests.Session(
             impersonate="chrome",
-            timeout=30,
+            timeout=_request_timeout_for_deadline(deadline, 30),
             verify=verify_tls,
         )
         session.headers.update({"user-agent": DEFAULT_PROTOCOL_USER_AGENT})
@@ -540,6 +617,7 @@ def run_protocol_chatgpt_login_init_from_path(
                     session=session,
                     device_id=device_id,
                     explicit_proxy=explicit_proxy,
+                    deadline=deadline,
                 )
                 authorize_init_response = _chatgpt_login_request(
                     session,
@@ -547,6 +625,7 @@ def run_protocol_chatgpt_login_init_from_path(
                     auth_url,
                     explicit_proxy=explicit_proxy,
                     request_label="chatgpt-login-authorize-init",
+                    deadline=deadline,
                     timeout=20,
                 )
                 if int(getattr(authorize_init_response, "status_code", 0) or 0) >= 400:
@@ -577,6 +656,8 @@ def run_protocol_chatgpt_login_init_from_path(
                     AUTHORIZE_CONTINUE_URL,
                     explicit_proxy=explicit_proxy,
                     request_label="chatgpt-login-authorize-continue",
+                    deadline=deadline,
+                    timeout=30,
                     headers=authorize_continue_headers,
                     data=json.dumps(
                         {
@@ -629,6 +710,7 @@ def run_protocol_chatgpt_login_init_from_path(
                         mailbox_ref=mailbox_ref_value,
                         mailbox_session_id=mailbox_session_id_value,
                         min_mail_id=otp_min_mail_id,
+                        timeout_seconds=_remaining_deadline_seconds(deadline),
                     )
                     used_email_otp = True
                     otp_validate_headers = _build_protocol_headers(
@@ -643,6 +725,8 @@ def run_protocol_chatgpt_login_init_from_path(
                         EMAIL_OTP_VALIDATE_URL,
                         explicit_proxy=explicit_proxy,
                         request_label="chatgpt-login-otp-validate",
+                        deadline=deadline,
+                        timeout=20,
                         headers=otp_validate_headers,
                         data=json.dumps({"code": otp_code}),
                     )
@@ -656,6 +740,7 @@ def run_protocol_chatgpt_login_init_from_path(
                         )
                     page_type = _extract_page_type(oauth_entry_response)
 
+                _raise_if_login_deadline_exceeded(deadline)
                 oauth_entry_response = _complete_external_continue_url(
                     session,
                     oauth_entry_response,
@@ -693,6 +778,7 @@ def run_protocol_chatgpt_login_init_from_path(
                     final_url = response_url
                     selected_workspace_id = bootstrap_account_id
                 else:
+                    _raise_if_login_deadline_exceeded(deadline)
                     account_entries, personal_entry = _load_accounts_with_personal_preference(
                         session=session,
                         explicit_proxy=explicit_proxy,
@@ -710,8 +796,10 @@ def run_protocol_chatgpt_login_init_from_path(
                             session=session,
                             callback_url=callback_url,
                             explicit_proxy=explicit_proxy,
+                            deadline=deadline,
                         )
                         final_url = _response_url(callback_response) or callback_url
+                        _raise_if_login_deadline_exceeded(deadline)
                         account_entries, personal_entry = _load_accounts_with_personal_preference(
                             session=session,
                             explicit_proxy=explicit_proxy,
@@ -724,6 +812,7 @@ def run_protocol_chatgpt_login_init_from_path(
                                 session,
                                 explicit_proxy=explicit_proxy,
                             )
+                            _raise_if_login_deadline_exceeded(deadline)
                             callback_url = _submit_workspace_selection_for_callback(
                                 session=session,
                                 workspace_id=selected_workspace_id,
@@ -736,8 +825,10 @@ def run_protocol_chatgpt_login_init_from_path(
                             session=session,
                             callback_url=callback_url,
                             explicit_proxy=explicit_proxy,
+                            deadline=deadline,
                         )
                         final_url = _response_url(callback_response) or callback_url
+                        _raise_if_login_deadline_exceeded(deadline)
                         account_entries, personal_entry = _load_accounts_with_personal_preference(
                             session=session,
                             explicit_proxy=explicit_proxy,

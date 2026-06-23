@@ -302,6 +302,42 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(2, session_request.call_count)
 
+    def test_chatgpt_login_request_recomputes_retry_timeout_from_deadline(self) -> None:
+        session = mock.Mock()
+        response = SimpleNamespace(status_code=200, url="https://chatgpt.com/auth/login_with")
+        request_timeouts: list[object] = []
+        request_deadlines: list[object] = []
+
+        def _fake_session_request(*_args: object, **kwargs: object) -> SimpleNamespace:
+            request_timeouts.append(kwargs.get("timeout"))
+            request_deadlines.append(kwargs.get("deadline"))
+            if len(request_timeouts) == 1:
+                raise RuntimeError("curl: (28) Operation timed out")
+            return response
+
+        with mock.patch.object(
+            protocol_chatgpt_login,
+            "_session_request",
+            side_effect=_fake_session_request,
+        ), mock.patch.object(
+            protocol_chatgpt_login.time,
+            "monotonic",
+            side_effect=[100.0, 100.0, 115.0, 115.0],
+        ), mock.patch.object(protocol_chatgpt_login.time, "sleep", return_value=None):
+            result = protocol_chatgpt_login._chatgpt_login_request(
+                session,
+                "GET",
+                "https://chatgpt.com/auth/login_with",
+                explicit_proxy="http://proxy:8080",
+                request_label="chatgpt-login",
+                timeout=20,
+                deadline=120.0,
+            )
+
+        self.assertIs(result, response)
+        self.assertEqual([20, 5], request_timeouts)
+        self.assertEqual([None, None], request_deadlines)
+
     def test_send_email_otp_retries_transient_network_error(self) -> None:
         session = mock.Mock()
         response = SimpleNamespace(status_code=200, url="https://auth.openai.com/api/accounts/email-otp/send")
@@ -723,6 +759,117 @@ class EasyProtocolFlowTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         recover_mailbox_by_email.assert_not_called()
+
+    def test_account_availability_audit_passes_timeout_budget_to_http_login(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "seed.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "budget@example.com",
+                        "password": "secret",
+                        "mailboxRef": "cloudflare_temp_email:budget@example.com",
+                        "mailboxSessionId": "mailbox-session-budget",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            login_calls: list[dict[str, object]] = []
+
+            def _fake_run_protocol_chatgpt_login_init_from_path(**kwargs: object) -> dict[str, object]:
+                login_calls.append(dict(kwargs))
+                return {"ok": True, "status": "completed", "finalUrl": "https://chatgpt.com/"}
+
+            with mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+                side_effect=_fake_run_protocol_chatgpt_login_init_from_path,
+            ):
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(source_path),
+                                "email": "budget@example.com",
+                            }
+                        ],
+                        "timeout_seconds": 17,
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("login_succeeded", result["results"][0]["status"])
+        self.assertEqual(1, len(login_calls))
+        self.assertIn("timeout_seconds", login_calls[0])
+        self.assertGreater(float(login_calls[0]["timeout_seconds"]), 0)
+        self.assertLessEqual(float(login_calls[0]["timeout_seconds"]), 17)
+
+    def test_chatgpt_login_email_otp_wait_respects_remaining_timeout_budget(self) -> None:
+        wait_calls: list[dict[str, object]] = []
+
+        def _fake_wait_openai_code(**kwargs: object) -> str:
+            wait_calls.append(dict(kwargs))
+            return "123456"
+
+        with mock.patch.object(
+            protocol_chatgpt_login,
+            "wait_openai_code",
+            side_effect=_fake_wait_openai_code,
+        ), mock.patch.dict(os.environ, {"OTP_TIMEOUT_SECONDS": "300"}, clear=False):
+            code = protocol_chatgpt_login._wait_for_email_otp(
+                mailbox_ref="cloudflare_temp_email:budget@example.com",
+                mailbox_session_id="mailbox-session-budget",
+                min_mail_id=0,
+                timeout_seconds=7,
+            )
+
+        self.assertEqual("123456", code)
+        self.assertEqual(1, len(wait_calls))
+        self.assertEqual(7, wait_calls[0]["timeout_seconds"])
+
+    def test_account_availability_audit_returns_timeout_before_http_login_when_budget_exhausted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = Path(tmp_dir) / "seed.json"
+            source_path.write_text(
+                json.dumps(
+                    {
+                        "email": "timeout@example.com",
+                        "password": "secret",
+                        "mailboxRef": "cloudflare_temp_email:timeout@example.com",
+                        "mailboxSessionId": "mailbox-session-timeout",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                protocol_account_availability.time,
+                "monotonic",
+                side_effect=[100.0, 100.5, 101.1],
+            ), mock.patch.object(
+                protocol_account_availability,
+                "run_protocol_chatgpt_login_init_from_path",
+            ) as run_login:
+                result = easyprotocol_flow.dispatch_easyprotocol_step(
+                    step_type="audit_openai_account_availability",
+                    step_input={
+                        "targets": [
+                            {
+                                "source_path": str(source_path),
+                                "email": "timeout@example.com",
+                            }
+                        ],
+                        "recover_mailbox": False,
+                        "timeout_seconds": 1,
+                    },
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("inconclusive", result["results"][0]["status"])
+        self.assertEqual("account_audit_timeout_exceeded", result["results"][0]["detail"])
+        self.assertEqual("timeout", result["results"][0]["browser"]["status"])
+        run_login.assert_not_called()
 
     def test_account_availability_audit_prefers_refresh_token_validation_before_http_login(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

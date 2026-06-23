@@ -478,6 +478,7 @@ def dispatch_easyprotocol_step(*, step_type: str, step_input: dict[str, Any]) ->
             explicit_proxy=str(step_input.get("proxy_url") or "").strip() or None,
             login_entry_url=str(step_input.get("login_entry_url") or "").strip() or None,
             recover_mailbox=_as_bool(step_input.get("recover_mailbox"), True),
+            timeout_seconds=step_input.get("timeout_seconds") or step_input.get("timeoutSeconds"),
         )
 
     if normalized_step_type == "invite_codex_member":
