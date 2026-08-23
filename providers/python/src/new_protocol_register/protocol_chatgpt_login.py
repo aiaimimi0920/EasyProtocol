@@ -207,6 +207,8 @@ def _chatgpt_login_step_retryable(exc: BaseException) -> bool:
             "chatgpt_login_authorize_continue_failed",
             "chatgpt_nextauth_signin",
             "chatgpt_nextauth_callback_failed",
+            "client_auth_session_dump status=404",
+            '"code": "missing_session"',
         )
     )
 
@@ -563,7 +565,7 @@ def run_protocol_chatgpt_login_init_from_path(
 
     explicit_proxy = normalize_proxy_env_url(explicit_proxy) or None
     verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
-    max_network_attempts = 2
+    max_network_attempts = 3
     last_exc: BaseException | None = None
     deadline = _deadline_from_timeout_seconds(timeout_seconds)
     for network_attempt in range(1, max_network_attempts + 1):

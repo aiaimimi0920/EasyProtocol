@@ -9,6 +9,7 @@ param(
     [string]$ProviderImage = '',
     [string]$ProviderReleaseTag = '',
     [string]$RegisterOutputDirHost = '',
+    [string]$ProtocolBridgeVolumeName = '',
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
     [string]$MailboxServiceApiKey = '',
@@ -39,6 +40,7 @@ $networkName = if ($stack -and $stack.networkName) { [string]$stack.networkName 
 $composeFile = Join-Path $repoRoot 'deploy/service/base/docker-compose.yaml'
 $renderedConfigPath = if ([System.IO.Path]::IsPathRooted($ServiceOutput)) { $ServiceOutput } else { Join-Path $repoRoot $ServiceOutput }
 $renderedRuntimeEnvPath = if ([System.IO.Path]::IsPathRooted($ServiceEnvOutput)) { $ServiceEnvOutput } else { Join-Path $repoRoot $ServiceEnvOutput }
+$protocolBridgeComposeOverridePath = Join-Path (Split-Path -Parent $renderedConfigPath) 'docker-compose.protocol-bridge.generated.yaml'
 $useGhcrDeploy = $FromGhcr -or -not [string]::IsNullOrWhiteSpace($Image) -or -not [string]::IsNullOrWhiteSpace($ReleaseTag)
 $resolvedProviderImage = $ProviderImage
 if ([string]::IsNullOrWhiteSpace($resolvedProviderImage) -and -not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) {
@@ -72,7 +74,27 @@ if (-not (Test-Path -LiteralPath $renderedRuntimeEnvPath)) {
     throw "Missing rendered runtime env: $renderedRuntimeEnvPath"
 }
 
-if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey) -or -not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) {
+$resolvedProtocolBridgeVolumeName = $ProtocolBridgeVolumeName.Trim()
+if ([string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)) {
+    $bridgeEnvLine = Get-Content -LiteralPath $renderedRuntimeEnvPath |
+        Where-Object { $_ -match '^PROTOCOL_BRIDGE_DOCKER_VOLUME=' } |
+        Select-Object -Last 1
+    if ($bridgeEnvLine) {
+        $resolvedProtocolBridgeVolumeName = ($bridgeEnvLine -split '=', 2)[1].Trim()
+    }
+}
+if (
+    -not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName) -and
+    $resolvedProtocolBridgeVolumeName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+) {
+    throw "Invalid protocol bridge Docker volume name: $resolvedProtocolBridgeVolumeName"
+}
+
+if (
+    -not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey) -or
+    -not [string]::IsNullOrWhiteSpace($EasyProxyApiKey) -or
+    -not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)
+) {
     $patchArgs = @(
         (Join-Path $repoRoot 'scripts/patch-rendered-service-config.py'),
         '--config-path', $renderedConfigPath,
@@ -80,7 +102,19 @@ if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey) -or -not [string]::
     )
     if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $patchArgs += @('--mailbox-service-api-key', $MailboxServiceApiKey) }
     if (-not [string]::IsNullOrWhiteSpace($EasyProxyApiKey)) { $patchArgs += @('--easy-proxy-api-key', $EasyProxyApiKey) }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)) {
+        $patchArgs += @(
+            '--protocol-bridge-volume-name', $resolvedProtocolBridgeVolumeName,
+            '--compose-override-path', $protocolBridgeComposeOverridePath
+        )
+    }
     Invoke-EasyProtocolExternalCommand -FilePath 'python' -Arguments $patchArgs -FailureMessage 'patch-rendered-service-config.py failed'
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)) {
+    Invoke-EasyProtocolExternalCommand -FilePath 'docker' -Arguments @(
+        'volume', 'create', $resolvedProtocolBridgeVolumeName
+    ) -FailureMessage "docker volume create failed: $resolvedProtocolBridgeVolumeName"
 }
 
 if ($useGhcrDeploy) {
@@ -115,6 +149,9 @@ if ($useGhcrDeploy) {
         '-ComposeSourcePath', $composeFile
     )
     if ($SkipPull) { $args += '-SkipPull' }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)) {
+        $args += @('-ComposeOverrideSourcePath', $protocolBridgeComposeOverridePath)
+    }
 
     Write-Host "Deploying service/base from GHCR image: $Image" -ForegroundColor Cyan
     Invoke-EasyProtocolExternalCommand -FilePath $deployGhcrScript -Arguments $args -FailureMessage 'deploy-ghcr-easy-protocol-service.ps1 failed'
@@ -124,11 +161,15 @@ if ($useGhcrDeploy) {
 
 Ensure-EasyProtocolExternalNetwork -NetworkName $networkName
 
-if ($NoBuild) {
-    docker compose -f $composeFile up -d
-} else {
-    docker compose -f $composeFile up -d --build
+$composeArgs = @('compose', '-f', $composeFile)
+if (-not [string]::IsNullOrWhiteSpace($resolvedProtocolBridgeVolumeName)) {
+    $composeArgs += @('-f', $protocolBridgeComposeOverridePath)
 }
+$composeArgs += @('up', '-d')
+if (-not $NoBuild) {
+    $composeArgs += '--build'
+}
+& docker @composeArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "docker compose failed with exit code $LASTEXITCODE"

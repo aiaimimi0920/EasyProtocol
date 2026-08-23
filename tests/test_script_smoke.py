@@ -56,6 +56,8 @@ class ScriptSmokeTests(unittest.TestCase):
                     "C:/runtime/team-auth",
                     "-RegisterTeamLocalDirHost",
                     "C:/runtime/team-local",
+                    "-ProtocolBridgeVolumeName",
+                    "easyregister_protocol_bridge",
                     "-ProviderReleaseTag",
                     "providers-smoke",
                     "-MailboxServiceApiKey",
@@ -83,6 +85,8 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("C:/runtime/team-auth", args)
             self.assertIn("-RegisterTeamLocalDirHost", args)
             self.assertIn("C:/runtime/team-local", args)
+            self.assertIn("-ProtocolBridgeVolumeName", args)
+            self.assertIn("easyregister_protocol_bridge", args)
             self.assertIn("-ProviderReleaseTag", args)
             self.assertIn("providers-smoke", args)
             self.assertIn("-MailboxServiceApiKey", args)
@@ -121,13 +125,15 @@ class ScriptSmokeTests(unittest.TestCase):
                     "mailbox-smoke",
                     "-EasyProxyApiKey",
                     "proxy-smoke",
+                    "-ProtocolBridgeVolumeName",
+                    "easyregister_protocol_bridge",
                 ],
                 env={"EASYPROTOCOL_TEST_CAPTURE_EXTERNAL_COMMANDS_PATH": str(capture_path)},
             )
 
             self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
             records = read_json_lines(capture_path)
-            self.assertEqual(len(records), 2)
+            self.assertEqual(len(records), 3)
 
             patch_record = records[0]
             self.assertEqual(patch_record["FilePath"].lower(), "python")
@@ -141,8 +147,18 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("mailbox-smoke", patch_args)
             self.assertIn("--easy-proxy-api-key", patch_args)
             self.assertIn("proxy-smoke", patch_args)
+            self.assertIn("--protocol-bridge-volume-name", patch_args)
+            self.assertIn("easyregister_protocol_bridge", patch_args)
+            self.assertIn("--compose-override-path", patch_args)
 
-            record = records[1]
+            volume_record = records[1]
+            self.assertEqual("docker", volume_record["FilePath"])
+            self.assertEqual(
+                ["volume", "create", "easyregister_protocol_bridge"],
+                volume_record["Arguments"],
+            )
+
+            record = records[2]
             self.assertTrue(record["FilePath"].lower().endswith("deploy-ghcr-easy-protocol-service.ps1"))
             args = record["Arguments"]
             self.assertIn("-Image", args)
@@ -151,6 +167,7 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn(str(rendered_config), args)
             self.assertIn("-RuntimeEnvPath", args)
             self.assertIn(str(rendered_runtime_env), args)
+            self.assertIn("-ComposeOverrideSourcePath", args)
             self.assertIn("-SkipPull", args)
 
     def test_deploy_service_base_pulls_provider_image_for_ghcr_provider_tag(self):
@@ -400,6 +417,15 @@ class ScriptSmokeTests(unittest.TestCase):
         for token in required_tokens:
             self.assertIn(token, content)
 
+    def test_service_base_compose_bypasses_the_docker_desktop_proxy_socket(self):
+        compose_path = REPO_ROOT / "deploy" / "service" / "base" / "docker-compose.yaml"
+        content = compose_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "${EASY_PROTOCOL_DOCKER_SOCKET_SOURCE:-/run/docker.sock}:/var/run/docker.sock",
+            content,
+        )
+
     def test_managed_provider_process_pool_includes_browser_runtime_on_pythonpath(self):
         process_pool_path = REPO_ROOT / "service" / "base" / "services" / "provider_process_pool.go"
         content = process_pool_path.read_text(encoding="utf-8")
@@ -611,6 +637,7 @@ class ScriptSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             rendered_config = Path(temp_dir) / "service-config.yaml"
             runtime_env = Path(temp_dir) / "runtime.env"
+            compose_override = Path(temp_dir) / "docker-compose.protocol-bridge.generated.yaml"
             rendered_config.write_text(
                 yaml.safe_dump(
                     {
@@ -666,6 +693,10 @@ class ScriptSmokeTests(unittest.TestCase):
                     "C:/runtime/team-auth",
                     "--register-team-local-dir-host",
                     "C:/runtime/team-local",
+                    "--protocol-bridge-volume-name",
+                    "easyregister_protocol_bridge",
+                    "--compose-override-path",
+                    str(compose_override),
                     "--mailbox-service-api-key",
                     "new-mailbox-key",
                     "--easy-proxy-api-key",
@@ -693,6 +724,11 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertTrue(mounts["/shared/team-auth"]["read_only"])
             self.assertEqual("/run/desktop/mnt/host/c/runtime/team-local", mounts["/shared/local-team-store"]["source"])
             self.assertFalse(mounts["/shared/local-team-store"]["read_only"])
+            self.assertEqual(
+                "easyregister_protocol_bridge",
+                mounts["/shared/register-output/easyregister-bridge"]["source"],
+            )
+            self.assertFalse(mounts["/shared/register-output/easyregister-bridge"]["read_only"])
             env_lines = runtime_env.read_text(encoding="utf-8").splitlines()
             self.assertIn("MAILBOX_SERVICE_API_KEY=new-mailbox-key", env_lines)
             self.assertIn("EASY_PROXY_API_KEY=new-proxy-key", env_lines)
@@ -700,6 +736,20 @@ class ScriptSmokeTests(unittest.TestCase):
             self.assertIn("REGISTER_OUTPUT_DIR_HOST=/run/desktop/mnt/host/c/runtime/register-output", env_lines)
             self.assertIn("REGISTER_TEAM_AUTH_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-auth", env_lines)
             self.assertIn("REGISTER_TEAM_LOCAL_DIR_HOST=/run/desktop/mnt/host/c/runtime/team-local", env_lines)
+            self.assertIn("PROTOCOL_BRIDGE_DOCKER_VOLUME=easyregister_protocol_bridge", env_lines)
+            compose_payload = yaml.safe_load(compose_override.read_text(encoding="utf-8"))
+            service_mounts = compose_payload["services"]["easy-protocol"]["volumes"]
+            self.assertEqual(
+                [
+                    {
+                        "type": "volume",
+                        "source": "easyregister_protocol_bridge",
+                        "target": "/shared/register-output/easyregister-bridge",
+                    }
+                ],
+                service_mounts,
+            )
+            self.assertTrue(compose_payload["volumes"]["easyregister_protocol_bridge"]["external"])
 
     def test_patch_rendered_service_config_writes_docker_daemon_paths_to_runtime_env(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -751,6 +801,18 @@ class ScriptSmokeTests(unittest.TestCase):
         content = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
         self.assertIn("patch-rendered-service-config.py", content)
         self.assertIn("$shouldPatchBootstrappedServiceConfig", content)
+
+    def test_service_deploy_entrypoints_forward_protocol_bridge_volume_name(self):
+        root_deploy = (REPO_ROOT / "deploy-host.ps1").read_text(encoding="utf-8")
+        service_deploy = (REPO_ROOT / "scripts" / "deploy-service-base.ps1").read_text(encoding="utf-8")
+        subproject_deploy = (REPO_ROOT / "scripts" / "deploy-subproject.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("ProtocolBridgeVolumeName", root_deploy)
+        self.assertIn("--protocol-bridge-volume-name", root_deploy)
+        self.assertIn("ProtocolBridgeVolumeName", service_deploy)
+        self.assertIn("--protocol-bridge-volume-name", service_deploy)
+        self.assertIn("ProtocolBridgeVolumeName", subproject_deploy)
+        self.assertIn("-ProtocolBridgeVolumeName", subproject_deploy)
 
     def test_isolated_instance_deploy_uses_single_easy_protocol_compose_project(self):
         content = (REPO_ROOT / "scripts" / "deploy-isolated-easyprotocol-instance.ps1").read_text(encoding="utf-8")

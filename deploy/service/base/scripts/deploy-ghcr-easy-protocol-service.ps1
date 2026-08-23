@@ -15,6 +15,8 @@ param(
 
     [string]$ComposeSourcePath = '',
 
+    [string]$ComposeOverrideSourcePath = '',
+
     [string]$ContainerName = 'easy-protocol',
 
     [string]$NetworkAlias = 'easy-protocol',
@@ -78,10 +80,18 @@ if (-not (Test-Path -LiteralPath $ComposeSourcePath)) {
 $resolvedConfigPath = Resolve-FullPath -Path $ConfigPath
 $resolvedRuntimeEnvPath = Resolve-FullPath -Path $RuntimeEnvPath
 $resolvedComposeSourcePath = Resolve-FullPath -Path $ComposeSourcePath
+$resolvedComposeOverrideSourcePath = ''
+if (-not [string]::IsNullOrWhiteSpace($ComposeOverrideSourcePath)) {
+    if (-not (Test-Path -LiteralPath $ComposeOverrideSourcePath)) {
+        throw "Missing compose override: $ComposeOverrideSourcePath"
+    }
+    $resolvedComposeOverrideSourcePath = Resolve-FullPath -Path $ComposeOverrideSourcePath
+}
 $resolvedRuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
 $runtimeConfigDir = Join-Path $resolvedRuntimeRoot 'config'
 $runtimeDataDir = Join-Path $resolvedRuntimeRoot 'data'
 $runtimeComposePath = Join-Path $resolvedRuntimeRoot 'docker-compose.yaml'
+$runtimeComposeOverridePath = Join-Path $resolvedRuntimeRoot 'docker-compose.protocol-bridge.generated.yaml'
 $runtimeEnvFilePath = Join-Path $resolvedRuntimeRoot '.env'
 $runtimeConfigPath = Join-Path $runtimeConfigDir 'config.yaml'
 $runtimeRuntimeEnvPath = Join-Path $runtimeConfigDir 'runtime.env'
@@ -92,6 +102,9 @@ if ($PSCmdlet.ShouldProcess($resolvedRuntimeRoot, 'Prepare EasyProtocol GHCR run
     $null = New-Item -ItemType Directory -Force -Path $runtimeDataDir
 
     Sync-ItemIfNeeded -SourcePath $resolvedComposeSourcePath -DestinationPath $runtimeComposePath
+    if (-not [string]::IsNullOrWhiteSpace($resolvedComposeOverrideSourcePath)) {
+        Sync-ItemIfNeeded -SourcePath $resolvedComposeOverrideSourcePath -DestinationPath $runtimeComposeOverridePath
+    }
     Sync-ItemIfNeeded -SourcePath $resolvedConfigPath -DestinationPath $runtimeConfigPath
     Sync-ItemIfNeeded -SourcePath $resolvedRuntimeEnvPath -DestinationPath $runtimeRuntimeEnvPath
 
@@ -123,14 +136,19 @@ if (-not [string]::IsNullOrWhiteSpace($existingContainerId)) {
     }
 }
 
-if ($PSCmdlet.ShouldProcess($runtimeComposePath, 'Deploy EasyProtocol service container from GHCR')) {
-    Invoke-CheckedCommand -FilePath 'docker' -Arguments @(
+$composeArguments = @(
         'compose',
         '-p', $ComposeProjectName,
         '--env-file', $runtimeEnvFilePath,
-        '-f', $runtimeComposePath,
-        'up', '-d', '--remove-orphans'
-    ) -FailureMessage 'Docker Compose deployment failed'
+        '-f', $runtimeComposePath
+    )
+if (-not [string]::IsNullOrWhiteSpace($resolvedComposeOverrideSourcePath)) {
+    $composeArguments += @('-f', $runtimeComposeOverridePath)
+}
+$composeArguments += @('up', '-d', '--remove-orphans')
+
+if ($PSCmdlet.ShouldProcess($runtimeComposePath, 'Deploy EasyProtocol service container from GHCR')) {
+    Invoke-CheckedCommand -FilePath 'docker' -Arguments $composeArguments -FailureMessage 'Docker Compose deployment failed'
 }
 
 $deployedImage = (& docker inspect --format '{{.Config.Image}}' $ContainerName 2>$null)

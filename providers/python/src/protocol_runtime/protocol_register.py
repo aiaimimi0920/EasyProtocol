@@ -136,6 +136,46 @@ def _resolve_sentinel_screen_sum() -> int:
     return 4000
 
 
+def _resolve_protocol_phone_submit_http_timeout_seconds() -> float:
+    raw = str(os.environ.get("PROTOCOL_PHONE_SUBMIT_HTTP_TIMEOUT_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except Exception:
+            pass
+    return 30.0
+
+
+def _resolve_protocol_phone_submit_browser_timeout_seconds() -> float:
+    raw = str(os.environ.get("PROTOCOL_PHONE_SUBMIT_BROWSER_TIMEOUT_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except Exception:
+            pass
+    return 30.0
+
+
+def _resolve_protocol_phone_code_browser_completion_timeout_seconds() -> float:
+    raw = str(os.environ.get("PROTOCOL_PHONE_CODE_BROWSER_COMPLETION_TIMEOUT_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except Exception:
+            pass
+    return 30.0
+
+
+def _resolve_protocol_sentinel_http_timeout_seconds() -> float:
+    raw = str(os.environ.get("PROTOCOL_SENTINEL_HTTP_TIMEOUT_SECONDS") or "").strip()
+    if raw:
+        try:
+            return max(1.0, float(raw))
+        except Exception:
+            pass
+    return 30.0
+
+
 def _sentinel_profile_kwargs(profile: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(profile or {})
     window_flags = payload.get("window_flags")
@@ -170,6 +210,7 @@ PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV = "PROTOCOL_ENABLE_BROWSER_BOOTST
 PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV = "PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF"
 PROTOCOL_ENABLE_BROWSER_SENTINEL_ENV = "PROTOCOL_ENABLE_BROWSER_SENTINEL"
 PROTOCOL_BROWSER_SENTINEL_MAX_ATTEMPTS_ENV = "PROTOCOL_BROWSER_SENTINEL_MAX_ATTEMPTS"
+DEFAULT_PROTOCOL_PHONE_SUBMIT_BROWSER_SETTLE_SECONDS = 1.5
 MAILCREATE_BASE_URL = (os.environ.get("MAILCREATE_BASE_URL") or "https://mail.aiaimimi.com").strip()
 MAILCREATE_CUSTOM_AUTH = (os.environ.get("MAILCREATE_CUSTOM_AUTH") or "").strip()
 SENTINEL_HEADER_WHITELIST = frozenset({
@@ -253,6 +294,25 @@ class ProtocolBrowserBootstrapResult:
     imported_cookie_count: int
     auth_url: str = ""
     auth_state: str = ""
+
+
+def _refresh_oauth_start_from_browser_bootstrap(
+    oauth: OAuthStart,
+    browser_bootstrap_result: ProtocolBrowserBootstrapResult | None,
+) -> OAuthStart:
+    if browser_bootstrap_result is None:
+        return oauth
+    auth_url = str(browser_bootstrap_result.auth_url or "").strip()
+    auth_state = str(browser_bootstrap_result.auth_state or "").strip()
+    if not auth_url or not auth_state:
+        return oauth
+    redirect_uri = str(oauth.redirect_uri or "").strip() or CHATGPT_WEB_REDIRECT_URI
+    return OAuthStart(
+        auth_url=auth_url,
+        state=auth_state,
+        code_verifier=str(oauth.code_verifier or "").strip(),
+        redirect_uri=redirect_uri,
+    )
 
 
 _PRESERVED_BROWSER_NATIVE_FAILURE: dict[str, Any] | None = None
@@ -725,7 +785,7 @@ def _fetch_sentinel_token_direct(
                 "content-type": "text/plain;charset=UTF-8",
             },
             data=req_body,
-            timeout=15,
+            timeout=_resolve_protocol_sentinel_http_timeout_seconds(),
         )
         if resp.status_code != 200:
             print(
@@ -812,7 +872,7 @@ def _get_sentinel_header_for_signup(
                 "content-type": "text/plain;charset=UTF-8",
             },
             data=req_body,
-            timeout=15,
+            timeout=_resolve_protocol_sentinel_http_timeout_seconds(),
         )
         if resp.status_code == 200:
             resp_data = resp.json() or {}
@@ -3970,6 +4030,16 @@ def _browser_try_send_keys_to_input(element: Any, *, value: str, keys: Any) -> b
         return False
 
 
+def _browser_try_press_enter_on_input(element: Any, *, keys: Any) -> bool:
+    if not _browser_element_is_interactable(element):
+        return False
+    try:
+        element.send_keys(keys.ENTER)
+        return True
+    except Exception:
+        return False
+
+
 def _browser_find_candidate_elements(driver: Any, by: Any, selector: str) -> list[Any]:
     try:
         elements = list(driver.find_elements(by, selector) or [])
@@ -3982,6 +4052,108 @@ def _browser_find_candidate_elements(driver: Any, by: Any, selector: str) -> lis
     except Exception:
         return []
     return [element]
+
+
+def _browser_try_submit_phone_code_with_script(driver: Any, *, sms_code: str) -> bool:
+    code = str(sms_code or "").strip()
+    if not code:
+        return False
+    try:
+        result = driver.execute_script(
+            """
+            const code = String(arguments[0] || '').trim();
+            if (!code) {
+              return { ok: false, reason: 'empty_code' };
+            }
+            const isVisible = (el) => {
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              return !el.disabled
+                && style.visibility !== 'hidden'
+                && style.display !== 'none'
+                && rect.width > 0
+                && rect.height > 0;
+            };
+            const allInputs = Array.from(document.querySelectorAll('input')).filter(isVisible);
+            const otpInputs = allInputs.filter((el) => {
+              const attrs = [
+                el.getAttribute('name'),
+                el.getAttribute('id'),
+                el.getAttribute('autocomplete'),
+                el.getAttribute('inputmode'),
+                el.getAttribute('placeholder'),
+                el.getAttribute('aria-label'),
+                el.getAttribute('data-testid'),
+              ].map((item) => String(item || '').toLowerCase()).join(' ');
+              const maxLength = Number(el.getAttribute('maxlength') || 0);
+              return maxLength === 1
+                || attrs.includes('code')
+                || attrs.includes('otp')
+                || attrs.includes('verification');
+            });
+            const setInputValue = (input, value) => {
+              const proto = window.HTMLInputElement && window.HTMLInputElement.prototype;
+              const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+              if (descriptor && typeof descriptor.set === 'function') {
+                descriptor.set.call(input, value);
+              } else {
+                input.value = value;
+              }
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            };
+            let activeInput = null;
+            if (otpInputs.length >= code.length && code.length > 1) {
+              let filled = 0;
+              for (const input of otpInputs) {
+                if (filled >= code.length) break;
+                setInputValue(input, code[filled]);
+                activeInput = input;
+                filled += 1;
+              }
+              if (filled < code.length) {
+                return { ok: false, reason: 'partial_digit_fill', filled };
+              }
+            } else {
+              const target = otpInputs[0] || allInputs[0];
+              if (!target) {
+                return { ok: false, reason: 'no_input' };
+              }
+              setInputValue(target, code);
+              activeInput = target;
+            }
+            const labels = ['continue', 'verify', 'submit', 'next', 'confirm', 'done', '继续', '验证', '提交', '下一步', '确认'];
+            const buttons = Array.from(document.querySelectorAll('button,[role="button"],input[type="submit"]')).filter(isVisible);
+            for (const button of buttons) {
+              const text = String(button.innerText || button.textContent || button.value || button.getAttribute('aria-label') || '').trim().toLowerCase();
+              if (!text) continue;
+              if (!labels.some((label) => text.includes(label))) continue;
+              button.click();
+              return { ok: true, mode: 'button', text };
+            }
+            if (activeInput && activeInput.form) {
+              try {
+                if (typeof activeInput.form.requestSubmit === 'function') {
+                  activeInput.form.requestSubmit();
+                } else {
+                  activeInput.form.submit();
+                }
+                return { ok: true, mode: 'form' };
+              } catch (_err) {}
+            }
+            if (activeInput) {
+              activeInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+              activeInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+              return { ok: true, mode: 'enter' };
+            }
+            return { ok: false, reason: 'no_submit_surface' };
+            """,
+            code,
+        ) or {}
+    except Exception:
+        return False
+    return bool(isinstance(result, dict) and result.get("ok"))
 
 
 def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
@@ -4005,6 +4177,7 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
     except Exception:
         single_inputs = []
     usable_single_inputs = _browser_interactable_elements(single_inputs)
+    active_input = None
     if len(usable_single_inputs) >= len(code) and len(code) > 1:
         submitted_digits = 0
         for target in usable_single_inputs:
@@ -4012,15 +4185,18 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
                 break
             digit = code[submitted_digits]
             if _browser_try_send_keys_to_input(target, value=digit, keys=Keys):
+                active_input = target
                 submitted_digits += 1
         if submitted_digits < len(code):
-            return False
+            return _browser_try_submit_phone_code_with_script(driver, sms_code=code)
     else:
         selectors = [
             'input[name*="code"]',
             'input[id*="code"]',
             'input[autocomplete="one-time-code"]',
             'input[inputmode="numeric"]',
+            'input[placeholder*="code"]',
+            'input[aria-label*="code"]',
             'input[type="text"]',
         ]
         submitted_text = False
@@ -4032,14 +4208,15 @@ def _browser_try_submit_phone_code(driver: Any, *, sms_code: str) -> bool:
                     continue
                 seen_inputs.add(marker)
                 if _browser_try_send_keys_to_input(text_input, value=code, keys=Keys):
+                    active_input = text_input
                     submitted_text = True
                     break
             if submitted_text:
                 break
         if not submitted_text:
-            return False
+            return _browser_try_submit_phone_code_with_script(driver, sms_code=code)
     submit_button = None
-    labels = {"continue", "verify", "submit", "next", "继续", "验证", "提交", "下一步"}
+    labels = {"continue", "verify", "submit", "next", "confirm", "done", "继续", "验证", "提交", "下一步", "确认"}
     try:
         buttons = driver.find_elements(By.TAG_NAME, "button")
     except Exception:
@@ -6083,6 +6260,31 @@ def _phone_resume_request_kinds(resume_context: dict[str, Any]) -> tuple[str, ..
     return tuple(normalized)
 
 
+def _is_matching_phone_oauth_callback_url(current_url: str, oauth: OAuthStart) -> bool:
+    normalized = str(current_url or "").strip()
+    return bool(
+        normalized
+        and _callback_matches_redirect_uri(
+            callback_url=normalized,
+            redirect_uri=str(oauth.redirect_uri or ""),
+        )
+    )
+
+
+def _wait_for_phone_oauth_browser_navigation(driver: Any, *, oauth: OAuthStart) -> str:
+    deadline = time.monotonic() + _resolve_protocol_phone_code_browser_completion_timeout_seconds()
+    current_url = ""
+    while time.monotonic() < deadline:
+        current_url = str(getattr(driver, "current_url", "") or "").strip()
+        if _is_matching_phone_oauth_callback_url(current_url, oauth) or _is_callback_url(current_url):
+            return current_url
+        page_state = _browser_collect_page_state(driver)
+        if _browser_page_is_cloudflare_wait(page_state):
+            _browser_nudge_challenge_page(driver)
+        time.sleep(0.5)
+    return str(getattr(driver, "current_url", "") or current_url).strip()
+
+
 def _phone_resume_sentinel_context(
     *,
     resume_context: dict[str, Any],
@@ -6169,6 +6371,7 @@ def _submit_phone_number_via_protocol_session(
             request_label=f"resume-phone-send:{request_kind}",
             headers=headers,
             data=payload,
+            timeout=_resolve_protocol_phone_submit_http_timeout_seconds(),
         )
         if _response_has_cloudflare_challenge(response):
             last_error = (
@@ -6242,7 +6445,7 @@ def submit_phone_number_for_resume(
         _hydrate_browser_driver_with_protocol_session_cookies(driver, session=session)
         driver.get(continue_url)
         submitted = False
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + _resolve_protocol_phone_submit_browser_timeout_seconds()
         while time.monotonic() < deadline:
             if _browser_try_submit_phone_number(driver, phone_number=str(phone_number or "").strip()):
                 submitted = True
@@ -6250,7 +6453,7 @@ def submit_phone_number_for_resume(
             time.sleep(0.5)
         if not submitted:
             raise RuntimeError("phone_number_submit_failed")
-        time.sleep(1.5)
+        time.sleep(DEFAULT_PROTOCOL_PHONE_SUBMIT_BROWSER_SETTLE_SECONDS)
         _import_browser_driver_cookies_into_session(session, driver=driver)
         updated_url = str(getattr(driver, "current_url", "") or "").strip() or continue_url
         return {
@@ -6313,19 +6516,56 @@ def submit_phone_verification_code_for_resume(
         submitted = False
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
+            current_url = str(getattr(driver, "current_url", "") or "").strip()
+            if current_url and (
+                _callback_matches_redirect_uri(
+                    callback_url=current_url,
+                    redirect_uri=str(oauth.redirect_uri or ""),
+                )
+                or _is_callback_url(current_url)
+            ):
+                submitted = True
+                break
             if _browser_try_submit_phone_code(driver, sms_code=str(sms_code or "").strip()):
                 submitted = True
                 break
+            page_state = _browser_collect_page_state(driver)
+            if _browser_page_is_cloudflare_wait(page_state):
+                _browser_nudge_challenge_page(driver)
             time.sleep(0.5)
         if not submitted:
-            raise RuntimeError("phone_code_submit_failed")
-        time.sleep(2.0)
+            current_url = str(getattr(driver, "current_url", "") or "").strip()
+            snapshot_path = _browser_native_dump_page_snapshot(
+                driver,
+                note="phone_code_submit_failed",
+            )
+            raise RuntimeError(
+                "phone_code_submit_failed "
+                f"current={_format_logged_url(current_url)} "
+                f"snapshot={snapshot_path or '<none>'}"
+            )
+        current_url = _wait_for_phone_oauth_browser_navigation(driver, oauth=oauth)
+        if not _is_matching_phone_oauth_callback_url(current_url, oauth):
+            if current_url and _is_callback_url(current_url):
+                print(
+                    "[python-protocol-service] phone verification ignored mismatched callback "
+                    f"current={_format_logged_url(current_url)} "
+                    f"redirect={_format_logged_url(str(oauth.redirect_uri or ''))}"
+                )
+            browser_replay_error: BaseException | None = None
+            try:
+                driver.get(oauth.auth_url)
+            except Exception as exc:
+                browser_replay_error = exc
+            current_url = _wait_for_phone_oauth_browser_navigation(driver, oauth=oauth)
+            if browser_replay_error is not None and not _is_matching_phone_oauth_callback_url(current_url, oauth):
+                print(
+                    "[python-protocol-service] browser oauth replay navigation failed "
+                    f"error_type={type(browser_replay_error).__name__}"
+                )
+
         _import_browser_driver_cookies_into_session(session, driver=driver)
-        current_url = str(getattr(driver, "current_url", "") or "").strip()
-        if current_url and _callback_matches_redirect_uri(
-            callback_url=current_url,
-            redirect_uri=str(oauth.redirect_uri or ""),
-        ):
+        if _is_matching_phone_oauth_callback_url(current_url, oauth):
             callback_result = _callback_result_from_url(
                 callback_url=current_url,
                 oauth=oauth,
@@ -6963,7 +7203,7 @@ def _generate_sentinel_headers_for_session(
         request_label="sentinel-chat-requirements",
         headers=headers,
         json=payload,
-        timeout=15,
+        timeout=_resolve_protocol_sentinel_http_timeout_seconds(),
     )
     if req_response.status_code != 200:
         if request_kind in signup_flow_map:
@@ -9683,12 +9923,20 @@ def run_protocol_repair_once(
                 if _response_has_cloudflare_challenge(response)
                 else "oauth_authorize_repair_missing_did"
             )
-            sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_browser(
+            sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_easycaptcha_browser_bootstrap(
                 session,
                 sentinel_context=sentinel_context,
                 explicit_proxy=explicit_proxy,
                 reason=retry_reason,
             )
+            if browser_bootstrap_result is None:
+                sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_browser(
+                    session,
+                    sentinel_context=sentinel_context,
+                    explicit_proxy=explicit_proxy,
+                    reason=retry_reason,
+                )
+            oauth = _refresh_oauth_start_from_browser_bootstrap(oauth, browser_bootstrap_result)
             if browser_bootstrap_result is not None:
                 did = browser_bootstrap_result.did or _get_session_cookie(
                     session,
@@ -9750,12 +9998,20 @@ def run_protocol_repair_once(
                 if _response_has_cloudflare_challenge(signup_response)
                 else "authorize_continue_repair_invalid_state"
             )
-            sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_browser(
+            sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_easycaptcha_browser_bootstrap(
                 session,
                 sentinel_context=sentinel_context,
                 explicit_proxy=explicit_proxy,
                 reason=retry_reason,
             )
+            if browser_bootstrap_result is None:
+                sentinel_context, browser_bootstrap_result = _maybe_prime_protocol_auth_session_with_browser(
+                    session,
+                    sentinel_context=sentinel_context,
+                    explicit_proxy=explicit_proxy,
+                    reason=retry_reason,
+                )
+            oauth = _refresh_oauth_start_from_browser_bootstrap(oauth, browser_bootstrap_result)
             if browser_bootstrap_result is not None:
                 req_headers = _build_protocol_headers(
                     request_kind="repair-authorize-continue",

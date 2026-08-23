@@ -302,6 +302,21 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIs(result, response)
         self.assertEqual(2, session_request.call_count)
 
+    def test_chatgpt_login_step_retries_missing_client_auth_session(self) -> None:
+        self.assertTrue(
+            protocol_chatgpt_login._chatgpt_login_step_retryable(
+                RuntimeError(
+                    'client_auth_session_dump status=404 '
+                    'body={"error":{"code":"missing_session"}}'
+                )
+            )
+        )
+        self.assertFalse(
+            protocol_chatgpt_login._chatgpt_login_step_retryable(
+                RuntimeError("client_auth_session_dump status=403 body=access_denied")
+            )
+        )
+
     def test_chatgpt_login_request_recomputes_retry_timeout_from_deadline(self) -> None:
         session = mock.Mock()
         response = SimpleNamespace(status_code=200, url="https://chatgpt.com/auth/login_with")
@@ -388,6 +403,85 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("phone_number_submitted", result["status"])
         self.assertEqual("sms_verification", result["pageType"])
         self.assertEqual(2, session_request.call_count)
+
+    def test_get_sentinel_header_for_signup_uses_configurable_sentinel_timeout(self) -> None:
+        response = SimpleNamespace(status_code=200)
+        response.json = lambda: {
+            "token": "sentinel-c",
+            "proofofwork": {"required": False},
+            "turnstile": {"required": False},
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"PROTOCOL_SENTINEL_HTTP_TIMEOUT_SECONDS": "41.5"},
+            clear=False,
+        ), mock.patch.object(
+            protocol_register,
+            "get_pow_token",
+            return_value="req-token",
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            return_value=response,
+        ) as session_request:
+            header = protocol_register._get_sentinel_header_for_signup(
+                mock.Mock(),
+                device_id="device-123",
+                flow="authorize_continue",
+                request_kind="repair-authorize-continue",
+                explicit_proxy="http://proxy:8080",
+                sentinel_context=SimpleNamespace(user_agent="ua", data_build="build-1", profile={}),
+            )
+
+        self.assertEqual(41.5, session_request.call_args.kwargs["timeout"])
+        payload = json.loads(header)
+        self.assertEqual("req-token", payload["p"])
+        self.assertEqual("", payload["t"])
+        self.assertEqual("sentinel-c", payload["c"])
+        self.assertEqual("device-123", payload["id"])
+        self.assertEqual("authorize_continue", payload["flow"])
+
+    def test_generate_sentinel_headers_for_session_uses_configurable_sentinel_timeout(self) -> None:
+        response = SimpleNamespace(status_code=200)
+        response.json = lambda: {
+            "token": "sentinel-chat",
+            "turnstile": {},
+            "proofofwork": {"required": False},
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"PROTOCOL_SENTINEL_HTTP_TIMEOUT_SECONDS": "44"},
+            clear=False,
+        ), mock.patch.object(
+            protocol_register,
+            "get_pow_token",
+            return_value="req-token",
+        ), mock.patch.object(
+            protocol_register,
+            "generate_proof_token",
+            return_value="proof-token",
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            return_value=response,
+        ) as session_request:
+            headers = protocol_register._generate_sentinel_headers_for_session(
+                mock.Mock(),
+                explicit_proxy="http://proxy:8080",
+                user_agent="ua",
+                device_id="device-456",
+                data_build="build-2",
+                request_kind="repair-password-verify",
+            )
+
+        self.assertEqual("sentinel-chat-requirements", session_request.call_args.kwargs["request_label"])
+        self.assertEqual(44.0, session_request.call_args.kwargs["timeout"])
+        payload = json.loads(headers["openai-sentinel-token"])
+        self.assertEqual("proof-token", payload["p"])
+        self.assertEqual("", payload["t"])
+        self.assertEqual("sentinel-chat", payload["c"])
+        self.assertEqual("device-456", payload["id"])
+        self.assertEqual("password_verify", payload["flow"])
 
     def test_extract_chatgpt_client_bootstrap_reads_access_token(self) -> None:
         html = """
@@ -1695,6 +1789,157 @@ class EasyProtocolFlowTests(unittest.TestCase):
         callback_result_from_url.assert_not_called()
         continue_authenticated_codex_oauth.assert_called_once()
 
+    def test_submit_phone_verification_code_replays_oauth_in_browser_before_http_fallback(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "https://auth.openai.com/sms-verification"
+                self.visited: list[str] = []
+
+            def get(self, url: str) -> None:
+                self.visited.append(url)
+                if "/oauth/authorize" in url:
+                    self.current_url = "http://localhost:1455/auth/callback?code=abc&state=state_123"
+                else:
+                    self.current_url = "https://auth.openai.com/sms-verification"
+
+            def quit(self) -> None:
+                return None
+
+        driver = _FakeDriver()
+
+        def _submit_code(browser_driver: _FakeDriver, *, sms_code: str) -> bool:
+            self.assertEqual("123456", sms_code)
+            browser_driver.current_url = "https://chatgpt.com/api/auth/callback/openai?code=web&state=web_state"
+            return True
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (driver, None),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_code",
+            side_effect=_submit_code,
+        ), mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=protocol_register.ProtocolRegistrationResult(
+                email="user@example.com",
+                auth={"account_id": "acct_codex"},
+            ),
+        ) as callback_result_from_url, mock.patch.object(
+            protocol_register,
+            "_continue_authenticated_codex_oauth",
+        ) as continue_authenticated_codex_oauth:
+            result = protocol_register.submit_phone_verification_code_for_resume(
+                source_payload={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailboxRef": "mailtm:test",
+                    "firstName": "User",
+                    "lastName": "Example",
+                    "birthdate": "2000-01-01",
+                },
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/sms-verification",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/oauth/authorize?x=1",
+                        "state": "state_123",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "http://localhost:1455/auth/callback",
+                    },
+                },
+                sms_code="123456",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual("acct_codex", result["accountId"])
+        self.assertEqual(
+            [
+                "https://auth.openai.com/sms-verification",
+                "https://auth.openai.com/oauth/authorize?x=1",
+            ],
+            driver.visited,
+        )
+        callback_result_from_url.assert_called_once()
+        continue_authenticated_codex_oauth.assert_not_called()
+
+    def test_submit_phone_verification_code_for_resume_accepts_preexisting_callback_before_manual_input(self) -> None:
+        class _FakeDriver:
+            def __init__(self) -> None:
+                self.current_url = "http://localhost:1455/auth/callback?code=abc&state=state_browser"
+
+            def get(self, url: str) -> None:
+                self.current_url = "http://localhost:1455/auth/callback?code=abc&state=state_browser"
+
+            def quit(self) -> None:
+                return None
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda explicit_proxy, browser_backend=None: (_FakeDriver(), None),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_submit_phone_code",
+            return_value=False,
+        ) as browser_try_submit_phone_code, mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=protocol_register.ProtocolRegistrationResult(
+                email="user@example.com",
+                auth={"user_id": "user_123"},
+            ),
+        ) as callback_result_from_url, mock.patch.object(
+            protocol_register,
+            "_continue_authenticated_codex_oauth",
+        ) as continue_authenticated_codex_oauth:
+            result = protocol_register.submit_phone_verification_code_for_resume(
+                source_payload={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailboxRef": "mailtm:test",
+                    "firstName": "User",
+                    "lastName": "Example",
+                    "birthdate": "2000-01-01",
+                },
+                resume_context={
+                    "continueUrl": "https://auth.openai.com/sms-verification",
+                    "sessionCookies": [{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+                    "oauth": {
+                        "authUrl": "https://auth.openai.com/oauth/authorize?x=1",
+                        "state": "state_browser",
+                        "codeVerifier": "verifier_123",
+                        "redirectUri": "http://localhost:1455/auth/callback",
+                    },
+                },
+                sms_code="123456",
+                explicit_proxy=None,
+            )
+
+        self.assertEqual("user@example.com", result["email"])
+        self.assertEqual("user_123", result["auth"]["user_id"])
+        browser_try_submit_phone_code.assert_not_called()
+        callback_result_from_url.assert_called_once()
+        continue_authenticated_codex_oauth.assert_not_called()
+
     def test_browser_submit_phone_code_skips_hidden_otp_inputs(self) -> None:
         class _FakeElement:
             def __init__(self, *, displayed: bool, label: str) -> None:
@@ -2240,6 +2485,97 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("https://auth.openai.com/add-phone", result.resume_context["continueUrl"])
         self.assertEqual("device", result.resume_context["browser"]["deviceId"])
         self.assertEqual("state_123", result.resume_context["oauth"]["state"])
+
+    def test_run_protocol_repair_once_refreshes_oauth_state_from_browser_bootstrap_after_authorize_challenge(self) -> None:
+        session = mock.Mock()
+        session.headers = {}
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/api/accounts/authorize?x=1",
+            state="state_123",
+            code_verifier="verifier",
+            redirect_uri="https://chatgpt.com/api/auth/callback/openai",
+        )
+        challenge_response = SimpleNamespace(
+            status_code=403,
+            headers={"cf-mitigated": "challenge"},
+            url="https://auth.openai.com/api/accounts/authorize?x=1",
+            text="challenge",
+        )
+        challenge_response.json = lambda: {}
+        signup_response = SimpleNamespace(status_code=200, headers={}, url=protocol_register.AUTHORIZE_CONTINUE_URL, text="ok")
+        signup_response.json = lambda: {}
+        phone_response = SimpleNamespace(
+            status_code=200,
+            url="https://auth.openai.com/add-phone",
+        )
+        phone_response.json = lambda: {
+            "page": {"type": "add_phone"},
+            "continue_url": "https://auth.openai.com/add-phone",
+        }
+        browser_bootstrap = protocol_register.ProtocolBrowserBootstrapResult(
+            current_url="https://chatgpt.com/auth/login",
+            did="did_browser",
+            user_agent="ua-browser",
+            imported_cookie_count=4,
+            auth_url="https://auth.openai.com/api/accounts/authorize?browser=1&state=state_browser",
+            auth_state="state_browser",
+        )
+
+        with mock.patch.object(
+            protocol_register,
+            "generate_oauth_url",
+            return_value=oauth,
+        ), mock.patch.object(
+            protocol_register,
+            "get_mailbox_latest_message_id",
+            return_value=0,
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=[challenge_response, signup_response],
+        ), mock.patch.object(
+            protocol_register,
+            "_get_session_cookie",
+            return_value="",
+        ), mock.patch.object(
+            protocol_register,
+            "_maybe_prime_protocol_auth_session_with_easycaptcha_browser_bootstrap",
+            return_value=(SimpleNamespace(user_agent="ua-browser", device_id="did_browser"), browser_bootstrap),
+        ) as easycaptcha_browser_bootstrap, mock.patch.object(
+            protocol_register,
+            "_maybe_prime_protocol_auth_session_with_browser",
+        ) as local_browser_bootstrap, mock.patch.object(
+            protocol_register,
+            "_build_protocol_headers",
+            return_value={},
+        ), mock.patch.object(
+            protocol_register,
+            "_resolve_repair_oauth_entry",
+            return_value=(phone_response, "add_phone", protocol_register.LOGIN_PASSWORD_REFERER),
+        ), mock.patch.object(
+            protocol_register,
+            "_export_protocol_session_cookies",
+            return_value=[{"name": "a", "value": "b", "domain": ".openai.com", "path": "/"}],
+        ):
+            result = protocol_register.run_protocol_repair_once(
+                auth_obj={
+                    "email": "user@example.com",
+                    "password": "pw",
+                    "mailbox_ref": "mailtm:test",
+                    "session_id": "mailbox_123",
+                },
+                existing_session=session,
+                existing_sentinel_context=SimpleNamespace(user_agent="ua", device_id="device"),
+            )
+
+        self.assertTrue(result.phone_verification_required)
+        self.assertEqual("state_browser", result.resume_context["oauth"]["state"])
+        self.assertEqual(
+            "https://auth.openai.com/api/accounts/authorize?browser=1&state=state_browser",
+            result.resume_context["oauth"]["authUrl"],
+        )
+        easycaptcha_browser_bootstrap.assert_called_once()
+        local_browser_bootstrap.assert_not_called()
 
 
 if __name__ == "__main__":

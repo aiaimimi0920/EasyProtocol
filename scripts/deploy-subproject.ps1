@@ -33,6 +33,7 @@ param(
     [string]$ProviderReleaseTag = '',
     [switch]$SkipPull,
     [string]$RegisterOutputDirHost = '',
+    [string]$ProtocolBridgeVolumeName = '',
     [string]$RegisterTeamAuthDirHost = '',
     [string]$RegisterTeamLocalDirHost = '',
     [string]$MailboxServiceApiKey = '',
@@ -120,6 +121,7 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
         if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($ProtocolBridgeVolumeName)) { $args += @('-ProtocolBridgeVolumeName', $ProtocolBridgeVolumeName) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }
@@ -136,6 +138,7 @@ switch ($Project) {
         if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @('-ProviderImage', $ProviderImage) }
         if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @('-ProviderReleaseTag', $ProviderReleaseTag) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @('-RegisterOutputDirHost', $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($ProtocolBridgeVolumeName)) { $args += @('-ProtocolBridgeVolumeName', $ProtocolBridgeVolumeName) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @('-RegisterTeamAuthDirHost', $RegisterTeamAuthDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @('-RegisterTeamLocalDirHost', $RegisterTeamLocalDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @('-MailboxServiceApiKey', $MailboxServiceApiKey) }

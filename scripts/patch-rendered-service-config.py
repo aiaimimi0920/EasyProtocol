@@ -66,6 +66,7 @@ def patch_config(
     register_output_dir_host: str,
     register_team_auth_dir_host: str,
     register_team_local_dir_host: str,
+    protocol_bridge_volume_name: str,
     mailbox_service_api_key: str,
     easy_proxy_api_key: str,
 ) -> bool:
@@ -99,6 +100,7 @@ def patch_config(
         (register_output_dir_host, "/shared/register-output", False),
         (register_team_auth_dir_host, "/shared/team-auth", True),
         (register_team_local_dir_host, "/shared/local-team-store", False),
+        (protocol_bridge_volume_name, "/shared/register-output/easyregister-bridge", False),
     )
     before_mounts = yaml.safe_dump(mounts, sort_keys=False)
     for source, target, read_only in mount_overrides:
@@ -127,6 +129,34 @@ def write_env_file(path: Path, payload: dict[str, str]) -> None:
     path.write_text("\n".join(f"{key}={value}" for key, value in payload.items()) + "\n", encoding="utf-8")
 
 
+def patch_compose_override(path: Path, *, protocol_bridge_volume_name: str) -> bool:
+    if not protocol_bridge_volume_name:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", protocol_bridge_volume_name):
+        raise ValueError(f"invalid protocol bridge Docker volume name: {protocol_bridge_volume_name}")
+
+    payload = {
+        "services": {
+            "easy-protocol": {
+                "volumes": [
+                    {
+                        "type": "volume",
+                        "source": protocol_bridge_volume_name,
+                        "target": "/shared/register-output/easyregister-bridge",
+                    }
+                ]
+            }
+        },
+        "volumes": {protocol_bridge_volume_name: {"external": True}},
+    }
+    rendered = yaml.dump(payload, Dumper=NoAliasDumper, sort_keys=False, allow_unicode=False)
+    if path.exists() and path.read_text(encoding="utf-8") == rendered:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(rendered, encoding="utf-8")
+    return True
+
+
 def patch_env(
     env_path: Path,
     *,
@@ -134,6 +164,7 @@ def patch_env(
     register_output_dir_host: str,
     register_team_auth_dir_host: str,
     register_team_local_dir_host: str,
+    protocol_bridge_volume_name: str,
     mailbox_service_api_key: str,
     easy_proxy_api_key: str,
 ) -> bool:
@@ -146,6 +177,7 @@ def patch_env(
         "REGISTER_OUTPUT_DIR_HOST": normalize_docker_daemon_host_path(register_output_dir_host),
         "REGISTER_TEAM_AUTH_DIR_HOST": normalize_docker_daemon_host_path(register_team_auth_dir_host),
         "REGISTER_TEAM_LOCAL_DIR_HOST": normalize_docker_daemon_host_path(register_team_local_dir_host),
+        "PROTOCOL_BRIDGE_DOCKER_VOLUME": protocol_bridge_volume_name,
     }
     for key, value in overrides.items():
         if value and env.get(key) != value:
@@ -164,6 +196,8 @@ def main() -> int:
     parser.add_argument("--register-output-dir-host", default="")
     parser.add_argument("--register-team-auth-dir-host", default="")
     parser.add_argument("--register-team-local-dir-host", default="")
+    parser.add_argument("--protocol-bridge-volume-name", default="")
+    parser.add_argument("--compose-override-path", default="")
     parser.add_argument("--mailbox-service-api-key", default="")
     parser.add_argument("--easy-proxy-api-key", default="")
     args = parser.parse_args()
@@ -182,6 +216,7 @@ def main() -> int:
         register_output_dir_host=args.register_output_dir_host.strip(),
         register_team_auth_dir_host=args.register_team_auth_dir_host.strip(),
         register_team_local_dir_host=args.register_team_local_dir_host.strip(),
+        protocol_bridge_volume_name=args.protocol_bridge_volume_name.strip(),
         mailbox_service_api_key=args.mailbox_service_api_key.strip(),
         easy_proxy_api_key=args.easy_proxy_api_key.strip(),
     )
@@ -194,11 +229,20 @@ def main() -> int:
         register_output_dir_host=args.register_output_dir_host.strip(),
         register_team_auth_dir_host=args.register_team_auth_dir_host.strip(),
         register_team_local_dir_host=args.register_team_local_dir_host.strip(),
+        protocol_bridge_volume_name=args.protocol_bridge_volume_name.strip(),
         mailbox_service_api_key=args.mailbox_service_api_key.strip(),
         easy_proxy_api_key=args.easy_proxy_api_key.strip(),
     )
 
-    status = "patched" if config_changed or env_changed else "unchanged"
+    compose_override_changed = False
+    compose_override_path = args.compose_override_path.strip()
+    if compose_override_path:
+        compose_override_changed = patch_compose_override(
+            Path(compose_override_path).resolve(),
+            protocol_bridge_volume_name=args.protocol_bridge_volume_name.strip(),
+        )
+
+    status = "patched" if config_changed or env_changed or compose_override_changed else "unchanged"
     print(f"Rendered service config patch status: {status}")
     return 0
 

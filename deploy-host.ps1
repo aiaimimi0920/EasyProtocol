@@ -32,6 +32,7 @@ param(
     [string]$ProviderReleaseTag = "",
     [switch]$SkipPull,
     [string]$RegisterOutputDirHost = "",
+    [string]$ProtocolBridgeVolumeName = "",
     [string]$RegisterTeamAuthDirHost = "",
     [string]$RegisterTeamLocalDirHost = "",
     [string]$MailboxServiceApiKey = "",
@@ -295,6 +296,7 @@ if ($shouldBootstrapFromImport) {
     $shouldPatchBootstrappedServiceConfig = `
         (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage)) -or `
         (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) -or `
+        (-not [string]::IsNullOrWhiteSpace($ProtocolBridgeVolumeName)) -or `
         (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) -or `
         (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) -or `
         (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) -or `
@@ -308,6 +310,7 @@ if ($shouldBootstrapFromImport) {
         )
         if (-not [string]::IsNullOrWhiteSpace($resolvedProviderImage)) { $patchArgs += @("--python-provider-image", $resolvedProviderImage) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $patchArgs += @("--register-output-dir-host", $RegisterOutputDirHost) }
+        if (-not [string]::IsNullOrWhiteSpace($ProtocolBridgeVolumeName)) { $patchArgs += @("--protocol-bridge-volume-name", $ProtocolBridgeVolumeName) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $patchArgs += @("--register-team-auth-dir-host", $RegisterTeamAuthDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $patchArgs += @("--register-team-local-dir-host", $RegisterTeamLocalDirHost) }
         if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $patchArgs += @("--mailbox-service-api-key", $MailboxServiceApiKey) }
@@ -343,6 +346,7 @@ if (-not [string]::IsNullOrWhiteSpace($ProviderImage)) { $args += @("-ProviderIm
 if (-not [string]::IsNullOrWhiteSpace($ProviderReleaseTag)) { $args += @("-ProviderReleaseTag", $ProviderReleaseTag) }
 if ($SkipPull) { $args += "-SkipPull" }
 if (-not [string]::IsNullOrWhiteSpace($RegisterOutputDirHost)) { $args += @("-RegisterOutputDirHost", $RegisterOutputDirHost) }
+if (-not [string]::IsNullOrWhiteSpace($ProtocolBridgeVolumeName)) { $args += @("-ProtocolBridgeVolumeName", $ProtocolBridgeVolumeName) }
 if (-not [string]::IsNullOrWhiteSpace($RegisterTeamAuthDirHost)) { $args += @("-RegisterTeamAuthDirHost", $RegisterTeamAuthDirHost) }
 if (-not [string]::IsNullOrWhiteSpace($RegisterTeamLocalDirHost)) { $args += @("-RegisterTeamLocalDirHost", $RegisterTeamLocalDirHost) }
 if (-not [string]::IsNullOrWhiteSpace($MailboxServiceApiKey)) { $args += @("-MailboxServiceApiKey", $MailboxServiceApiKey) }
