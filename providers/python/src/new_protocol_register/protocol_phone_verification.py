@@ -6,9 +6,9 @@ from typing import Any
 from protocol_runtime import protocol_register
 
 if __package__ in (None, ""):
-    from others.storage import load_json_payload
+    from others.storage import load_json_payload, persist_success_auth_json
 else:
-    from .others.storage import load_json_payload
+    from .others.storage import load_json_payload, persist_success_auth_json
 
 
 def _extract_user_id(auth_payload: dict[str, Any]) -> str:
@@ -86,7 +86,8 @@ def submit_phone_verification_code_from_path(
     sms_code: str,
     explicit_proxy: str | None = None,
 ) -> dict[str, Any]:
-    payload = load_json_payload(Path(source_path).resolve())
+    resolved_source_path = Path(source_path).resolve()
+    payload = load_json_payload(resolved_source_path)
     response = protocol_register.submit_phone_verification_code_for_resume(
         source_payload=payload,
         resume_context=dict(resume_context or {}),
@@ -94,12 +95,23 @@ def submit_phone_verification_code_from_path(
         explicit_proxy=explicit_proxy,
     )
     auth_payload = dict(response.get("auth") or {})
+    email = str(response.get("email") or payload.get("email") or "").strip()
+    output_dir = (
+        resolved_source_path.parent.parent
+        if resolved_source_path.parent.name in {"first_phone", "small_success"}
+        else resolved_source_path.parent
+    )
+    success_path = persist_success_auth_json(
+        output_dir=str(output_dir),
+        email=email,
+        auth_obj=auth_payload,
+    )
     return {
         "ok": True,
         "status": "completed",
-        "email": str(response.get("email") or "").strip(),
+        "email": email,
         "accountId": str(response.get("accountId") or "").strip(),
         "userId": _extract_user_id(auth_payload),
-        "successPath": str(response.get("successPath") or "").strip(),
+        "successPath": success_path,
         "auth": auth_payload,
     }

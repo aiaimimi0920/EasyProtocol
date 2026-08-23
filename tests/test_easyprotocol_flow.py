@@ -1584,6 +1584,44 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("completed", result["status"])
         self.assertEqual("user_123", result["userId"])
 
+    def test_submit_phone_verification_code_persists_success_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            source_dir = output_dir / "small_success"
+            source_dir.mkdir(parents=True)
+            source_path = source_dir / "small.json"
+            source_path.write_text(
+                json.dumps({"email": "user@example.com"}),
+                encoding="utf-8",
+            )
+            auth_payload = {
+                "email": "user@example.com",
+                "account_id": "account_123",
+                "https://api.openai.com/auth": {"chatgpt_user_id": "user_123"},
+            }
+
+            with mock.patch.object(
+                protocol_register,
+                "submit_phone_verification_code_for_resume",
+                return_value={
+                    "auth": auth_payload,
+                    "email": "user@example.com",
+                    "accountId": "account_123",
+                },
+            ):
+                result = protocol_phone_verification.submit_phone_verification_code_from_path(
+                    source_path=str(source_path),
+                    resume_context={"continueUrl": "https://auth.openai.com/sms-verification"},
+                    sms_code="123456",
+                    explicit_proxy=None,
+                )
+
+            success_path = Path(result["successPath"])
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(output_dir / "success", success_path.parent)
+            self.assertTrue(success_path.is_file())
+            self.assertEqual(auth_payload, json.loads(success_path.read_text(encoding="utf-8")))
+
     def test_submit_phone_number_for_resume_updates_resume_context_after_browser_step(self) -> None:
         class _FakeDriver:
             def __init__(self) -> None:
