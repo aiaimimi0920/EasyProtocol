@@ -32,6 +32,7 @@ from new_protocol_register import protocol_phone_verification  # noqa: E402
 from new_protocol_register import protocol_small_success  # noqa: E402
 from new_protocol_register.others import runtime as protocol_runtime  # noqa: E402
 from protocol_runtime import protocol_register  # noqa: E402
+from protocol_runtime.errors import ProtocolRuntimeError  # noqa: E402
 from shared_mailbox import easy_email_client  # noqa: E402
 from shared_captcha import service_client as captcha_service_client  # noqa: E402
 from new_protocol_register.protocol_small_success import (  # noqa: E402
@@ -223,6 +224,167 @@ class EasyProtocolFlowTests(unittest.TestCase):
             else:
                 os.environ[PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV] = original_stage2
 
+    def test_full_flow_platform_login_retries_after_transient_block(self) -> None:
+        session = mock.Mock()
+        initial_context = SimpleNamespace(user_agent="ua")
+        refreshed_context = SimpleNamespace(user_agent="ua", refreshed=True)
+        response = SimpleNamespace(status_code=200)
+        blocked = ProtocolRuntimeError(
+            "platform_login status=403",
+            stage="stage_platform_login",
+            detail="platform_login",
+        )
+        with mock.patch.object(
+            protocol_small_success,
+            "_open_platform_login",
+            side_effect=[blocked, response],
+        ) as open_platform_login, mock.patch.object(
+            protocol_small_success,
+            "_prime_openai_login_session_with_browser",
+            return_value=(refreshed_context, True),
+        ) as prime_browser:
+            sentinel_context, result = protocol_small_success._open_platform_login_with_browser_retry(
+                session=session,
+                sentinel_context=initial_context,
+                explicit_proxy="http://proxy:8080",
+            )
+
+        self.assertIs(refreshed_context, sentinel_context)
+        self.assertIs(response, result)
+        self.assertEqual(2, open_platform_login.call_count)
+        prime_browser.assert_called_once_with(
+            session=session,
+            sentinel_context=initial_context,
+            explicit_proxy="http://proxy:8080",
+            reason="openai_login_platform_login_retry",
+        )
+
+    def test_full_flow_platform_login_continues_with_browser_session_when_retry_stays_blocked(self) -> None:
+        session = mock.Mock()
+        initial_context = SimpleNamespace(user_agent="ua")
+        first_block = ProtocolRuntimeError(
+            "platform_login status=403",
+            stage="stage_platform_login",
+            detail="platform_login",
+        )
+        second_block = ProtocolRuntimeError(
+            "platform_login status=403",
+            stage="stage_platform_login",
+            detail="platform_login",
+        )
+        refreshed_context = SimpleNamespace(user_agent="ua-browser", device_id="did-browser")
+        with mock.patch.object(
+            protocol_small_success,
+            "_open_platform_login",
+            side_effect=[first_block, second_block],
+        ) as open_platform_login, mock.patch.object(
+            protocol_small_success,
+            "_prime_openai_login_session_with_browser",
+            return_value=(refreshed_context, True),
+        ) as prime_browser:
+            result_context, result = protocol_small_success._open_platform_login_with_browser_retry(
+                session=session,
+                sentinel_context=initial_context,
+                explicit_proxy="http://proxy:8080",
+            )
+
+        self.assertIs(refreshed_context, result_context)
+        self.assertIsNone(result)
+        self.assertEqual(2, open_platform_login.call_count)
+        prime_browser.assert_called_once()
+
+    def test_platform_auth0_authorize_recovers_invalid_state_and_refreshes_device_id(self) -> None:
+        session = mock.Mock()
+        initial_context = SimpleNamespace(user_agent="ua", device_id="did-old")
+        refreshed_context = SimpleNamespace(user_agent="ua-browser", device_id="did-new")
+        blocked = SimpleNamespace(status_code=400, headers={}, text="invalid_state")
+        success = SimpleNamespace(status_code=302, headers={}, text="", url="https://auth.openai.com/callback")
+        auth_url = "https://auth.openai.com/api/accounts/authorize?device_id=did-old&ext-oai-did=did-old&state=state"
+        with mock.patch.object(
+            protocol_small_success,
+            "_session_request",
+            return_value=blocked,
+        ) as session_request, mock.patch.object(
+            protocol_small_success,
+            "_recover_platform_auth0_authorize_in_browser",
+            return_value=(
+                refreshed_context,
+                success,
+                "https://auth.openai.com/api/accounts/authorize?state=state&device_id=did-new&ext-oai-did=did-new",
+                "did-new",
+            ),
+        ) as browser_recovery, mock.patch.object(
+            protocol_small_success,
+            "_openai_login_init_response_needs_retry",
+            return_value=True,
+        ), mock.patch.object(
+            protocol_small_success,
+            "_login_session_cookie",
+            return_value="login-session",
+        ):
+            result_context, result, result_url, result_device_id = (
+                protocol_small_success._platform_auth0_authorize_with_browser_retry(
+                    session=session,
+                    auth_url=auth_url,
+                    device_id="did-old",
+                    sentinel_context=initial_context,
+                    explicit_proxy="http://proxy:8080",
+                    request_label="authorize-test",
+                )
+            )
+
+        self.assertIs(refreshed_context, result_context)
+        self.assertIs(success, result)
+        self.assertEqual("did-new", result_device_id)
+        self.assertIn("device_id=did-new", result_url)
+        self.assertIn("ext-oai-did=did-new", result_url)
+        self.assertEqual(1, session_request.call_count)
+        browser_recovery.assert_called_once_with(
+            session=session,
+            auth_url=auth_url,
+            device_id="did-old",
+            sentinel_context=initial_context,
+            explicit_proxy="http://proxy:8080",
+        )
+
+    def test_platform_auth0_authorize_requires_interaction_when_challenged_without_cookie(self) -> None:
+        session = mock.Mock()
+        initial_context = SimpleNamespace(user_agent="ua", device_id="did-old")
+        hydrated_context = SimpleNamespace(user_agent="ua-browser", device_id="did-browser")
+        blocked = SimpleNamespace(status_code=403, headers={"cf-mitigated": "challenge"}, text="challenge")
+        browser_response = SimpleNamespace(status_code=200, headers={}, text="", url="https://auth.openai.com/create-account/password")
+        auth_url = "https://auth.openai.com/api/accounts/authorize?device_id=did-old&state=state"
+        with mock.patch.object(
+            protocol_small_success,
+            "_session_request",
+            side_effect=[blocked, blocked],
+        ), mock.patch.object(
+            protocol_small_success,
+            "_openai_login_init_response_needs_retry",
+            return_value=True,
+        ), mock.patch.object(
+            protocol_small_success,
+            "_login_session_cookie",
+            return_value="",
+        ), mock.patch.object(
+            protocol_small_success,
+            "_recover_platform_auth0_authorize_in_browser",
+            return_value=(hydrated_context, browser_response, auth_url, "did-browser"),
+        ) as browser_recovery:
+            with self.assertRaisesRegex(ProtocolRuntimeError, "browser_verification_required") as caught:
+                protocol_small_success._platform_auth0_authorize_with_browser_retry(
+                    session=session,
+                    auth_url=auth_url,
+                    device_id="did-old",
+                    sentinel_context=initial_context,
+                    explicit_proxy="http://proxy:8080",
+                    request_label="authorize-test",
+                )
+
+        self.assertEqual("stage_auth_continue", caught.exception.stage)
+        self.assertEqual("oauth_authorize", caught.exception.detail)
+        browser_recovery.assert_not_called()
+
     def test_classify_invite_error_detects_deactivated_workspace(self) -> None:
         payload = {
             "detail": {
@@ -269,6 +431,163 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertIn(("har1:without_email", "token-har1-without-email"), candidates)
         self.assertIn(("har2:without_email", "token-har2-without-email"), candidates)
         self.assertEqual(6, get_sentinel.call_count)
+
+    def test_openai_login_init_response_needs_retry_for_rate_limit_and_blocked_code(self) -> None:
+        rate_limited_response = SimpleNamespace(
+            status_code=429,
+            headers={},
+            text="",
+            url="https://auth.openai.com/api/accounts/authorize/continue",
+            json=lambda: {},
+        )
+        blocked_response = SimpleNamespace(
+            status_code=400,
+            headers={},
+            text="",
+            url="https://auth.openai.com/api/accounts/authorize/continue",
+            json=lambda: {"error": {"code": "authorize_continue_blocked"}},
+        )
+
+        self.assertTrue(protocol_small_success._openai_login_init_response_needs_retry(rate_limited_response))
+        self.assertTrue(protocol_small_success._openai_login_init_response_needs_retry(blocked_response))
+
+    def test_authorize_continue_browser_retry_preserves_main_signup_submitter(self) -> None:
+        session = mock.Mock()
+        initial_context = SimpleNamespace(name="initial")
+        updated_context = SimpleNamespace(name="updated")
+        blocked_response = SimpleNamespace(
+            status_code=400,
+            headers={},
+            text="",
+            url="https://auth.openai.com/api/accounts/authorize/continue",
+            json=lambda: {"error": {"code": "authorize_continue_blocked"}},
+        )
+        success_response = SimpleNamespace(
+            status_code=200,
+            headers={},
+            text="",
+            url="https://auth.openai.com/create-account/password",
+            json=lambda: {"page": {"type": "create_account"}},
+        )
+
+        with mock.patch.object(
+            protocol_small_success,
+            "_submit_authorize_continue_login_or_signup",
+            side_effect=[blocked_response, success_response],
+        ) as submit_signup, mock.patch.object(
+            protocol_small_success,
+            "_submit_authorize_continue_login_or_create_account",
+        ) as submit_login_or_create, mock.patch.object(
+            protocol_small_success,
+            "_prime_openai_login_session_with_browser",
+            return_value=(updated_context, True),
+        ) as prime_browser, mock.patch.object(
+            protocol_small_success,
+            "_ensure_openai_login_session_ready",
+            return_value=updated_context,
+        ) as ensure_ready:
+            result_context, result_response = (
+                protocol_small_success._submit_authorize_continue_with_browser_retry(
+                    session=session,
+                    email="demo@example.com",
+                    device_id="device-id",
+                    sentinel_context=initial_context,
+                    explicit_proxy="http://proxy:8080",
+                    use_create_account_referer=True,
+                )
+            )
+
+        self.assertIs(updated_context, result_context)
+        self.assertIs(success_response, result_response)
+        self.assertEqual(2, submit_signup.call_count)
+        self.assertIs(initial_context, submit_signup.call_args_list[0].kwargs["sentinel_context"])
+        self.assertIs(updated_context, submit_signup.call_args_list[1].kwargs["sentinel_context"])
+        submit_login_or_create.assert_not_called()
+        prime_browser.assert_called_once()
+        ensure_ready.assert_called_once()
+
+    def test_authorize_continue_browser_retry_preserves_login_init_submitter(self) -> None:
+        session = mock.Mock()
+        sentinel_context = SimpleNamespace(name="initial")
+        success_response = SimpleNamespace(
+            status_code=200,
+            headers={},
+            text="",
+            url="https://auth.openai.com/create-account/password",
+            json=lambda: {"page": {"type": "create_account"}},
+        )
+
+        with mock.patch.object(
+            protocol_small_success,
+            "_submit_authorize_continue_login_or_signup",
+        ) as submit_signup, mock.patch.object(
+            protocol_small_success,
+            "_submit_authorize_continue_login_or_create_account",
+            return_value=success_response,
+        ) as submit_login_or_create, mock.patch.object(
+            protocol_small_success,
+            "_prime_openai_login_session_with_browser",
+        ) as prime_browser:
+            result_context, result_response = (
+                protocol_small_success._submit_authorize_continue_with_browser_retry(
+                    session=session,
+                    email="demo@example.com",
+                    device_id="device-id",
+                    sentinel_context=sentinel_context,
+                    explicit_proxy="http://proxy:8080",
+                    use_create_account_referer=False,
+                )
+            )
+
+        self.assertIs(sentinel_context, result_context)
+        self.assertIs(success_response, result_response)
+        submit_signup.assert_not_called()
+        submit_login_or_create.assert_called_once()
+        prime_browser.assert_not_called()
+
+    def test_prepare_passwordless_email_otp_keeps_auto_sent_verification_code(self) -> None:
+        session = mock.Mock()
+        sentinel_context = SimpleNamespace(name="sentinel")
+        with mock.patch.object(protocol_small_success, "_send_email_otp") as send_email_otp:
+            passwordless = protocol_small_success._prepare_passwordless_email_otp(
+                session=session,
+                page_type="email_otp_verification",
+                explicit_proxy="http://proxy:8080",
+                sentinel_context=sentinel_context,
+            )
+
+        self.assertTrue(passwordless)
+        send_email_otp.assert_not_called()
+
+    def test_prepare_passwordless_email_otp_sends_when_requested(self) -> None:
+        session = mock.Mock()
+        sentinel_context = SimpleNamespace(name="sentinel")
+        with mock.patch.object(protocol_small_success, "_send_email_otp") as send_email_otp:
+            passwordless = protocol_small_success._prepare_passwordless_email_otp(
+                session=session,
+                page_type="email_otp_send",
+                explicit_proxy="http://proxy:8080",
+                sentinel_context=sentinel_context,
+            )
+
+        self.assertTrue(passwordless)
+        send_email_otp.assert_called_once_with(
+            session,
+            explicit_proxy="http://proxy:8080",
+            header_builder=sentinel_context,
+        )
+
+    def test_prepare_passwordless_email_otp_leaves_password_signup_unchanged(self) -> None:
+        with mock.patch.object(protocol_small_success, "_send_email_otp") as send_email_otp:
+            passwordless = protocol_small_success._prepare_passwordless_email_otp(
+                session=mock.Mock(),
+                page_type="create_account",
+                explicit_proxy=None,
+                sentinel_context=SimpleNamespace(name="sentinel"),
+            )
+
+        self.assertFalse(passwordless)
+        send_email_otp.assert_not_called()
 
     def test_captcha_service_client_rejects_easybrowser_base_url(self) -> None:
         original_base_url = os.environ.get("CAPTCHA_SERVICE_BASE_URL")
@@ -1313,6 +1632,13 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("/v1/browser/sessions/browser-session-1/release", post_paths[-1])
 
     def test_chatgpt_login_details_merge_preserves_existing_oauth_tokens(self) -> None:
+        authenticated_session = {
+            "version": 1,
+            "capturedAt": 123,
+            "proxyFingerprint": "fingerprint",
+            "sessionCookies": [{"name": "session", "value": "value", "domain": ".chatgpt.com"}],
+            "browser": {"userAgent": "ua", "deviceId": "did"},
+        }
         details = protocol_chatgpt_login._merge_chatgpt_login_details(
             seed_payload={
                 "chatgptLoginDetails": {
@@ -1336,6 +1662,7 @@ class EasyProtocolFlowTests(unittest.TestCase):
             },
             page_type="chatgpt_logged_in",
             network_attempt=2,
+            authenticated_session=authenticated_session,
         )
 
         self.assertEqual("refresh.demo", details["oauthTokens"]["refresh_token"])
@@ -1343,6 +1670,67 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual([{"id": "acct_1"}], details["accounts"])
         self.assertEqual("chatgpt_logged_in", details["pageType"])
         self.assertEqual(2, details["networkAttempt"])
+        self.assertEqual(authenticated_session, details["authenticatedSession"])
+
+    def test_authenticated_session_context_is_bound_to_proxy_and_filters_cookie_domains(self) -> None:
+        session = SimpleNamespace(
+            cookies=[
+                SimpleNamespace(
+                    name="session",
+                    value="session-value",
+                    domain=".chatgpt.com",
+                    path="/",
+                    secure=True,
+                    expires=2000,
+                ),
+                SimpleNamespace(
+                    name="unrelated",
+                    value="ignored",
+                    domain="example.com",
+                    path="/",
+                    secure=True,
+                    expires=2000,
+                ),
+                SimpleNamespace(
+                    name="expired",
+                    value="ignored-expired",
+                    domain=".openai.com",
+                    path="/",
+                    secure=True,
+                    expires=999,
+                ),
+            ]
+        )
+        with mock.patch.object(protocol_register.time, "time", return_value=1000):
+            context = protocol_register.export_authenticated_session_context(
+                session=session,
+                user_agent="test-user-agent",
+                device_id="did-123",
+                explicit_proxy="http://proxy.local:8080",
+            )
+
+        self.assertEqual(1, len(context["sessionCookies"]))
+        self.assertEqual(".chatgpt.com", context["sessionCookies"][0]["domain"])
+        self.assertNotIn("proxy.local", json.dumps(context))
+        restored_session = mock.Mock()
+        with mock.patch.object(protocol_register.time, "time", return_value=1001), mock.patch.object(
+            protocol_register,
+            "_restore_protocol_session_from_resume_context",
+            return_value=restored_session,
+        ) as restore_session:
+            result = protocol_register.restore_authenticated_session_from_context(
+                context,
+                explicit_proxy="http://proxy.local:8080",
+            )
+        self.assertIs(restored_session, result)
+        restore_session.assert_called_once()
+
+        with mock.patch.object(protocol_register.time, "time", return_value=1001):
+            with self.assertRaisesRegex(RuntimeError, "authenticated_session_proxy_mismatch"):
+                protocol_register.restore_authenticated_session_from_context(
+                    context,
+                    explicit_proxy="http://different-proxy.local:8080",
+                )
 
     def test_obtain_team_mother_oauth_force_email_auth_skips_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1456,6 +1844,164 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("C:/tmp/first-phone.json", result.storage_path)
         persist_first_phone_record.assert_called_once()
         persist_success_auth_json.assert_not_called()
+
+    def test_run_protocol_oauth_once_reuses_completed_chatgpt_session_without_password_repair(self) -> None:
+        authenticated_session = {
+            "version": 1,
+            "capturedAt": 123,
+            "proxyFingerprint": "fingerprint",
+            "sessionCookies": [{"name": "session", "value": "value", "domain": ".chatgpt.com"}],
+            "browser": {"userAgent": "ua", "deviceId": "did"},
+        }
+        seed_payload = {
+            "email": "user@example.com",
+            "password": "pw",
+            "mailboxRef": "mailtm:test",
+            "mailboxSessionId": "mailbox_123",
+            "firstName": "User",
+            "lastName": "Example",
+            "birthdate": "2000-01-01",
+            "chatgptLogin": {
+                "ok": True,
+                "status": "completed",
+                "personalWorkspaceId": "workspace_123",
+            },
+            "chatgptLoginDetails": {"authenticatedSession": authenticated_session},
+        }
+        normalized_auth = protocol_oauth._normalize_seed_payload(seed_payload)
+        restored_session = mock.Mock()
+
+        with mock.patch.object(
+            protocol_oauth,
+            "_refresh_seed_mailbox_binding",
+            return_value=(normalized_auth, {}),
+        ), mock.patch.object(
+            protocol_oauth,
+            "_ensure_protocol_oauth_easy_runtime_defaults",
+        ), mock.patch.object(
+            protocol_oauth,
+            "flow_network_env",
+            return_value=contextlib.nullcontext(),
+        ), mock.patch.object(
+            protocol_oauth,
+            "restore_authenticated_session_from_context",
+            return_value=restored_session,
+        ) as restore_session, mock.patch.object(
+            protocol_oauth,
+            "handoff_authenticated_chatgpt_session_to_codex",
+            return_value=protocol_register.ProtocolRegistrationResult(
+                email="user@example.com",
+                auth={"mailboxRef": "mailtm:test"},
+                phone_verification_required=True,
+                page_type="add_phone",
+                final_url="https://auth.openai.com/add-phone",
+                resume_context={"continueUrl": "https://auth.openai.com/add-phone"},
+            ),
+        ) as session_handoff, mock.patch.object(
+            protocol_oauth,
+            "run_protocol_repair_once",
+        ) as password_repair, mock.patch.object(
+            protocol_oauth,
+            "persist_first_phone_record",
+            return_value="C:/tmp/first-phone.json",
+        ), mock.patch.object(
+            protocol_oauth,
+            "release_mailbox_sessions_by_email",
+            return_value=[],
+        ):
+            result = protocol_oauth.run_protocol_oauth_once(
+                seed_payload=seed_payload,
+                output_dir="C:/tmp/out",
+                explicit_proxy="http://proxy.local:8080",
+            )
+
+        self.assertTrue(result.phone_verification_required)
+        restore_session.assert_called_once_with(
+            authenticated_session,
+            explicit_proxy="http://proxy.local:8080",
+        )
+        session_handoff.assert_called_once()
+        self.assertEqual(
+            "workspace_123",
+            session_handoff.call_args.kwargs["preferred_workspace_id"],
+        )
+        password_repair.assert_not_called()
+        restored_session.close.assert_called_once()
+
+    def test_authenticated_session_exchange_prefers_workspace_from_completed_chatgpt_login(self) -> None:
+        session = mock.Mock()
+        oauth = SimpleNamespace()
+        initial_result = protocol_register.ProtocolRegistrationResult(
+            email="user@example.com",
+            auth={"account_id": "account_123"},
+        )
+        completed_result = protocol_register.ProtocolRegistrationResult(
+            email="user@example.com",
+            auth={"account_id": "account_123"},
+        )
+
+        with mock.patch.object(
+            protocol_register,
+            "_extract_workspace_id_from_session",
+        ) as extract_workspace, mock.patch.object(
+            protocol_register,
+            "_submit_workspace_selection_for_callback",
+            return_value="http://localhost:1455/auth/callback?code=abc&state=state_123",
+        ) as submit_workspace, mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=initial_result,
+        ), mock.patch.object(
+            protocol_register,
+            "_maybe_recover_personal_protocol_result",
+            return_value=completed_result,
+        ):
+            result = protocol_register._exchange_authenticated_session_for_codex_result(
+                session=session,
+                oauth=oauth,
+                explicit_proxy="http://proxy.local:8080",
+                default_email="user@example.com",
+                mailbox_ref="mailtm:test",
+                password="",
+                first_name="User",
+                last_name="Example",
+                birthdate="2000-01-01",
+                workspace_request_label="workspace-select-test",
+                preferred_workspace_id="workspace_123",
+            )
+
+        self.assertIs(completed_result, result)
+        extract_workspace.assert_not_called()
+        self.assertEqual("workspace_123", submit_workspace.call_args.kwargs["workspace_id"])
+
+    def test_run_protocol_oauth_from_path_clears_consumed_authenticated_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seed_path = Path(tmpdir) / "seed.json"
+            seed_path.write_text(
+                json.dumps(
+                    {
+                        "email": "user@example.com",
+                        "chatgptLoginDetails": {
+                            "authenticatedSession": {"version": 1, "sessionCookies": [{"value": "secret"}]},
+                            "oauthTokens": {"refresh_token": "refresh.demo"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            expected_result = SimpleNamespace(ok=True)
+            with mock.patch.object(
+                protocol_oauth,
+                "run_protocol_oauth_once",
+                return_value=expected_result,
+            ):
+                result = protocol_oauth.run_protocol_oauth_from_path(seed_path=seed_path)
+
+            persisted = json.loads(seed_path.read_text(encoding="utf-8"))
+
+        self.assertIs(expected_result, result)
+        self.assertNotIn("authenticatedSession", persisted["chatgptLoginDetails"])
+        self.assertEqual("refresh.demo", persisted["chatgptLoginDetails"]["oauthTokens"]["refresh_token"])
 
     def test_refresh_seed_mailbox_binding_reuses_recent_existing_binding(self) -> None:
         created_at = (
@@ -2523,6 +3069,1517 @@ class EasyProtocolFlowTests(unittest.TestCase):
         self.assertEqual("https://auth.openai.com/add-phone", result.resume_context["continueUrl"])
         self.assertEqual("device", result.resume_context["browser"]["deviceId"])
         self.assertEqual("state_123", result.resume_context["oauth"]["state"])
+
+    def test_authenticated_session_handoff_preserves_workspace_phone_wall_for_sms_resume(self) -> None:
+        session = mock.Mock()
+        session.headers = {"user-agent": "ua"}
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            state="state_123",
+            code_verifier="verifier",
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+        authorize_response = SimpleNamespace(
+            status_code=302,
+            headers={"Location": "https://auth.openai.com/oauth/resume?state=state_123"},
+            url=oauth.auth_url,
+            text="",
+            json=lambda: {},
+        )
+        choose_account_response = SimpleNamespace(
+            status_code=302,
+            headers={"Location": "/choose-an-account"},
+            url="https://auth.openai.com/oauth/resume?state=state_123",
+            text="",
+            json=lambda: {},
+        )
+        phone_response = SimpleNamespace(
+            status_code=200,
+            headers={},
+            url="https://auth.openai.com/add-phone",
+            text="",
+            json=lambda: {
+                "page": {"type": "add_phone"},
+                "continue_url": "https://auth.openai.com/add-phone",
+            },
+        )
+
+        events: list[str] = []
+
+        def request_side_effect(*args: object, **kwargs: object) -> object:
+            events.append(str(kwargs.get("request_label") or "request"))
+            return authorize_response if len(events) == 1 else choose_account_response
+
+        def exchange_side_effect(**kwargs: object) -> object:
+            events.append("workspace-exchange")
+            raise protocol_register._PhoneWallResponseError(
+                response=phone_response,
+                context="workspace_select",
+            )
+
+        with mock.patch.object(
+            protocol_register,
+            "generate_oauth_url",
+            return_value=oauth,
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=request_side_effect,
+        ) as session_request, mock.patch.object(
+            protocol_register,
+            "_maybe_finish_codex_oauth_from_response",
+            return_value=None,
+        ) as finish_oauth, mock.patch.object(
+            protocol_register,
+            "_complete_codex_oauth_with_browser",
+            side_effect=RuntimeError("codex_browser_handoff_incomplete"),
+        ) as browser_handoff, mock.patch.object(
+            protocol_register,
+            "_exchange_authenticated_session_for_codex_result",
+            side_effect=exchange_side_effect,
+        ) as exchange_session, mock.patch.object(
+            protocol_register,
+            "_get_session_cookie",
+            return_value="did-123",
+        ), mock.patch.object(
+            protocol_register,
+            "_export_protocol_session_cookies",
+            return_value=[{"name": "session", "value": "value", "domain": ".chatgpt.com", "path": "/"}],
+        ):
+            result = protocol_register.handoff_authenticated_chatgpt_session_to_codex(
+                session=session,
+                explicit_proxy="http://proxy.local:8080",
+                email="user@example.com",
+                mailbox_ref="mailtm:test",
+                first_name="User",
+                last_name="Example",
+                birthdate="2000-01-01",
+            )
+
+        self.assertTrue(result.phone_verification_required)
+        self.assertEqual("add_phone", result.page_type)
+        self.assertEqual("session_handoff_workspace_select", result.resume_context["context"])
+        self.assertEqual("state_123", result.resume_context["oauth"]["state"])
+        self.assertEqual("did-123", result.resume_context["browser"]["deviceId"])
+        self.assertEqual(
+            [
+                "oauth-authorize-codex-handoff",
+                "oauth-authorize-codex-handoff-prime",
+                "workspace-exchange",
+            ],
+            events,
+        )
+        self.assertEqual(
+            "https://auth.openai.com/oauth/resume?state=state_123",
+            session_request.call_args_list[1].args[2],
+        )
+        self.assertEqual(
+            oauth.auth_url,
+            session_request.call_args_list[1].kwargs["headers"]["referer"],
+        )
+        finish_oauth.assert_called_once()
+        browser_handoff.assert_called_once()
+        self.assertEqual(
+            "https://auth.openai.com/choose-an-account",
+            exchange_session.call_args.kwargs["workspace_referer"],
+        )
+
+    def test_authenticated_session_handoff_uses_browser_for_account_picker_html(self) -> None:
+        session = mock.Mock()
+        session.headers = {"user-agent": "ua"}
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            state="state_123",
+            code_verifier="verifier",
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+        authorize_response = SimpleNamespace(
+            status_code=302,
+            headers={"Location": "https://auth.openai.com/oauth/resume?state=state_123"},
+            url=oauth.auth_url,
+            text="",
+            json=lambda: {},
+        )
+        account_picker_response = SimpleNamespace(
+            status_code=200,
+            headers={},
+            url="https://auth.openai.com/choose-an-account",
+            text="<html><body>Choose an account</body></html>",
+            json=lambda: {},
+        )
+        callback_url = "http://localhost:1455/auth/callback?code=code_123&state=state_123"
+        initial_result = object()
+        expected_result = object()
+
+        with mock.patch.object(
+            protocol_register,
+            "generate_oauth_url",
+            return_value=oauth,
+        ), mock.patch.object(
+            protocol_register,
+            "_session_request",
+            side_effect=[authorize_response, account_picker_response],
+        ), mock.patch.object(
+            protocol_register,
+            "_maybe_finish_codex_oauth_from_response",
+            return_value=None,
+        ), mock.patch.object(
+            protocol_register,
+            "_complete_codex_oauth_with_browser",
+            return_value=(callback_url, None),
+        ) as browser_handoff, mock.patch.object(
+            protocol_register,
+            "_callback_result_from_url",
+            return_value=initial_result,
+        ) as callback_result, mock.patch.object(
+            protocol_register,
+            "_maybe_recover_personal_protocol_result",
+            return_value=expected_result,
+        ) as recover_personal, mock.patch.object(
+            protocol_register,
+            "_exchange_authenticated_session_for_codex_result",
+        ) as exchange_session:
+            result = protocol_register.handoff_authenticated_chatgpt_session_to_codex(
+                session=session,
+                explicit_proxy="http://proxy.local:8080",
+                email="user@example.com",
+                mailbox_ref="mailtm:test",
+                first_name="User",
+                last_name="Example",
+                birthdate="2000-01-01",
+                preferred_workspace_id="workspace-personal",
+            )
+
+        self.assertIs(expected_result, result)
+        browser_handoff.assert_called_once_with(
+            session=session,
+            oauth=oauth,
+            explicit_proxy="http://proxy.local:8080",
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+            entry_url="https://auth.openai.com/choose-an-account",
+        )
+        callback_result.assert_called_once_with(
+            callback_url=callback_url,
+            oauth=oauth,
+            explicit_proxy="http://proxy.local:8080",
+            default_email="user@example.com",
+            mailbox_ref="mailtm:test",
+            password="",
+            first_name="User",
+            last_name="Example",
+            birthdate="2000-01-01",
+            token_post_try_direct_first=True,
+        )
+        recover_personal.assert_called_once()
+        self.assertIs(initial_result, recover_personal.call_args.kwargs["initial_result"])
+        exchange_session.assert_not_called()
+
+    def test_browser_codex_handoff_clicks_account_and_returns_callback(self) -> None:
+        session = SimpleNamespace(headers={})
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            state="state_123",
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+        callback_url = "http://localhost:1455/auth/callback?code=code_123&state=state_123"
+        browser_user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        )
+        driver = SimpleNamespace(
+            current_url="https://auth.openai.com/choose-an-account",
+            get=mock.Mock(),
+            execute_script=mock.Mock(return_value=browser_user_agent),
+            quit=mock.Mock(),
+        )
+
+        def click_account(*args: object, **kwargs: object) -> str:
+            driver.current_url = callback_url
+            return "account"
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda *args, **kwargs: (driver, "proxy-dir"),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ) as hydrate_browser, mock.patch.object(
+            protocol_register,
+            "_browser_collect_page_state",
+            return_value={
+                "href": "https://auth.openai.com/choose-an-account",
+                "title": "Choose an account",
+                "bodyText": "Choose an account",
+                "readyState": "complete",
+            },
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_click_codex_oauth_action",
+            side_effect=click_account,
+        ) as click_action, mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ) as import_cookies, mock.patch.object(
+            protocol_register.time,
+            "sleep",
+        ), mock.patch.object(
+            protocol_register.shutil,
+            "rmtree",
+        ) as remove_tree:
+            result = protocol_register._complete_codex_oauth_with_browser(
+                session=session,
+                oauth=oauth,
+                explicit_proxy="http://proxy.local:8080",
+                default_email="user@example.com",
+                preferred_workspace_id="workspace-personal",
+                entry_url="https://auth.openai.com/choose-an-account",
+            )
+
+        self.assertEqual((callback_url, None), result)
+        driver.get.assert_called_once_with("https://auth.openai.com/choose-an-account")
+        hydrate_browser.assert_called_once_with(driver, session=session)
+        click_action.assert_called_once_with(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+        import_cookies.assert_called_once_with(session, driver=driver)
+        self.assertEqual(browser_user_agent, session.headers["user-agent"])
+        driver.quit.assert_called_once_with()
+        remove_tree.assert_called_once_with("proxy-dir", ignore_errors=True)
+
+    def test_browser_codex_handoff_uses_native_workspace_selection_in_same_driver(self) -> None:
+        session = SimpleNamespace(headers={})
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            state="state_123",
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+        entry_url = "https://auth.openai.com/choose-an-account"
+        continue_url = "https://auth.openai.com/oauth/resume"
+        callback_url = "http://localhost:1455/auth/callback?code=code_123&state=state_123"
+        browser_user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        )
+        driver = SimpleNamespace(
+            current_url=entry_url,
+            get=mock.Mock(),
+            execute_async_script=mock.Mock(
+                return_value={
+                    "ok": True,
+                    "status": 200,
+                    "continueUrl": continue_url,
+                }
+            ),
+            execute_script=mock.Mock(return_value=browser_user_agent),
+            quit=mock.Mock(),
+        )
+
+        def navigate(url: str) -> None:
+            if url == continue_url:
+                driver.current_url = callback_url
+
+        driver.get.side_effect = navigate
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda *args, **kwargs: (driver, "proxy-dir"),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_collect_page_state",
+            return_value={"readyState": "complete", "bodyText": "Choose an account"},
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_click_codex_oauth_action",
+        ) as click_action, mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register.time,
+            "sleep",
+        ), mock.patch.object(
+            protocol_register.shutil,
+            "rmtree",
+        ):
+            result = protocol_register._complete_codex_oauth_with_browser(
+                session=session,
+                oauth=oauth,
+                explicit_proxy="http://proxy.local:8080",
+                default_email="user@example.com",
+                preferred_workspace_id="workspace-personal",
+                entry_url=entry_url,
+            )
+
+        self.assertEqual((callback_url, None), result)
+        self.assertEqual([mock.call(entry_url), mock.call(continue_url)], driver.get.call_args_list)
+        self.assertEqual(
+            "workspace-personal",
+            driver.execute_async_script.call_args.args[1],
+        )
+        native_script = driver.execute_async_script.call_args.args[0]
+        self.assertIn("/api/accounts/workspace/select", native_script)
+        self.assertIn("credentials: 'include'", native_script)
+        self.assertNotIn("workspace-personal", native_script)
+        click_action.assert_not_called()
+
+    def test_browser_native_workspace_selection_4xx_is_safe_and_single_flight(self) -> None:
+        driver = SimpleNamespace(
+            current_url="https://auth.openai.com/choose-an-account?state=must-not-persist",
+            execute_async_script=mock.Mock(
+                return_value={
+                    "ok": False,
+                    "status": 403,
+                    "continueUrl": "secret=must-not-escape",
+                }
+            ),
+        )
+
+        first = protocol_register._browser_try_submit_codex_workspace_selection(
+            driver,
+            preferred_workspace_id="workspace-personal",
+        )
+        second = protocol_register._browser_try_submit_codex_workspace_selection(
+            driver,
+            preferred_workspace_id="workspace-personal",
+        )
+
+        self.assertEqual(("", "http_4xx"), first)
+        self.assertEqual(("", "already_attempted"), second)
+        self.assertNotIn("secret", " ".join(first + second))
+        driver.execute_async_script.assert_called_once()
+
+    def test_workspace_selection_uses_session_browser_user_agent_and_matching_client_hints(self) -> None:
+        browser_user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+        )
+        session = SimpleNamespace(headers={"User-Agent": browser_user_agent})
+        workspace_response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {"continue_url": "https://auth.openai.com/oauth/resume"},
+        )
+        with mock.patch.object(
+            protocol_register,
+            "_session_request",
+            return_value=workspace_response,
+        ) as session_request, mock.patch.object(
+            protocol_register,
+            "_raise_if_phone_wall_response",
+        ), mock.patch.object(
+            protocol_register,
+            "_follow_redirect_chain_for_callback",
+            return_value="http://localhost:1455/auth/callback?code=abc&state=state_123",
+        ):
+            callback_url = protocol_register._submit_workspace_selection_for_callback(
+                session=session,
+                workspace_id="workspace_123",
+                explicit_proxy="http://proxy.local:8080",
+                referer=protocol_register.CONSENT_REFERER,
+                workspace_request_label="workspace-select-test",
+            )
+
+        self.assertIn("code=abc", callback_url)
+        request_headers = session_request.call_args.kwargs["headers"]
+        self.assertEqual(browser_user_agent, request_headers["user-agent"])
+        self.assertIn('"145"', request_headers["sec-ch-ua"])
+        self.assertEqual('"Windows"', request_headers["sec-ch-ua-platform"])
+
+    def test_workspace_selection_prefers_sentinel_user_agent_over_session(self) -> None:
+        sentinel_user_agent = (
+            "Mozilla/5.0 (X11; Linux x86_64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        )
+        headers = protocol_register._build_workspace_selection_headers(
+            session=SimpleNamespace(
+                headers={"user-agent": protocol_register.DEFAULT_PROTOCOL_USER_AGENT}
+            ),
+            referer=protocol_register.CONSENT_REFERER,
+            header_builder=SimpleNamespace(user_agent=sentinel_user_agent),
+        )
+
+        self.assertEqual(sentinel_user_agent, headers["user-agent"])
+        self.assertIn('"146"', headers["sec-ch-ua"])
+        self.assertEqual('"Linux"', headers["sec-ch-ua-platform"])
+
+    def test_browser_codex_handoff_recovers_auth_root_once(self) -> None:
+        session = mock.Mock()
+        oauth = SimpleNamespace(
+            auth_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            state="state_123",
+            redirect_uri="http://localhost:1455/auth/callback",
+        )
+        entry_url = "https://auth.openai.com/choose-an-account"
+        callback_url = "http://localhost:1455/auth/callback?code=code_123&state=state_123"
+        driver = SimpleNamespace(
+            current_url=entry_url,
+            window_handles=["main"],
+            get=mock.Mock(),
+            quit=mock.Mock(),
+        )
+
+        def navigate(url: str) -> None:
+            if url == oauth.auth_url:
+                driver.current_url = callback_url
+
+        driver.get.side_effect = navigate
+
+        def click_account(*args: object, **kwargs: object) -> str:
+            driver.current_url = "https://auth.openai.com/?state=state_123"
+            return "account"
+
+        with mock.patch.object(
+            protocol_register,
+            "_load_protocol_browser_new_driver",
+            return_value=lambda *args, **kwargs: (driver, "proxy-dir"),
+        ), mock.patch.object(
+            protocol_register,
+            "_hydrate_browser_driver_with_protocol_session_cookies",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_collect_page_state",
+            return_value={"readyState": "complete"},
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_try_click_codex_oauth_action",
+            side_effect=click_account,
+        ) as click_action, mock.patch.object(
+            protocol_register,
+            "_browser_codex_action_probe",
+            return_value={},
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_switch_to_single_new_window",
+            return_value=(False, False),
+        ), mock.patch.object(
+            protocol_register,
+            "_browser_codex_action_diagnostics",
+            return_value={},
+        ), mock.patch.object(
+            protocol_register,
+            "_import_browser_driver_cookies_into_session",
+            return_value=2,
+        ), mock.patch.object(
+            protocol_register.time,
+            "sleep",
+        ), mock.patch.object(
+            protocol_register.shutil,
+            "rmtree",
+        ):
+            result = protocol_register._complete_codex_oauth_with_browser(
+                session=session,
+                oauth=oauth,
+                explicit_proxy="http://proxy.local:8080",
+                default_email="user@example.com",
+                preferred_workspace_id="workspace-personal",
+                entry_url=entry_url,
+            )
+
+        self.assertEqual((callback_url, None), result)
+        self.assertEqual([mock.call(entry_url), mock.call(oauth.auth_url)], driver.get.call_args_list)
+        click_action.assert_called_once()
+        self.assertEqual("", driver._protocol_last_codex_account_picker_action_key)
+
+    def test_browser_cookie_hydration_prefers_host_only_cdp_cookie_injection(self) -> None:
+        cookie = SimpleNamespace(
+            name="__Host-session",
+            value="test-value",
+            domain="auth.openai.com",
+            domain_specified=False,
+            path="/",
+            secure=True,
+            expires=1780000000,
+            _rest={"HttpOnly": True, "SameSite": "Lax"},
+        )
+        session = SimpleNamespace(cookies=[cookie])
+        driver = SimpleNamespace(
+            get=mock.Mock(),
+            execute_cdp_cmd=mock.Mock(return_value={"success": True}),
+            add_cookie=mock.Mock(),
+        )
+
+        imported = protocol_register._hydrate_browser_driver_with_protocol_session_cookies(
+            driver,
+            session=session,
+        )
+
+        self.assertEqual(1, imported)
+        driver.execute_cdp_cmd.assert_called_once()
+        command, payload = driver.execute_cdp_cmd.call_args.args
+        self.assertEqual("Network.setCookie", command)
+        self.assertEqual("https://auth.openai.com/", payload["url"])
+        self.assertNotIn("domain", payload)
+        self.assertTrue(payload["httpOnly"])
+        self.assertEqual("Lax", payload["sameSite"])
+        driver.add_cookie.assert_not_called()
+
+    def test_browser_cookie_hydration_falls_back_when_cdp_rejects_cookie(self) -> None:
+        cookie = SimpleNamespace(
+            name="session",
+            value="test-value",
+            domain=".chatgpt.com",
+            domain_specified=True,
+            path="/",
+            secure=True,
+            expires=None,
+            _rest={},
+        )
+        session = SimpleNamespace(cookies=[cookie])
+        driver = SimpleNamespace(
+            get=mock.Mock(),
+            execute_cdp_cmd=mock.Mock(return_value={"success": False}),
+            add_cookie=mock.Mock(),
+        )
+
+        imported = protocol_register._hydrate_browser_driver_with_protocol_session_cookies(
+            driver,
+            session=session,
+        )
+
+        self.assertEqual(1, imported)
+        driver.add_cookie.assert_called_once()
+        self.assertEqual("chatgpt.com", driver.add_cookie.call_args.args[0]["domain"])
+
+    def test_browser_cookie_hydration_preserves_domain_cookie_scope_and_false_http_only(self) -> None:
+        cookie = SimpleNamespace(
+            name="session",
+            value="test-value",
+            domain=".openai.com",
+            domain_specified=True,
+            path="/auth",
+            secure=True,
+            expires=None,
+            _rest={"HttpOnly": "false", "SameSite": "Strict"},
+        )
+        session = SimpleNamespace(cookies=[cookie])
+        driver = SimpleNamespace(
+            get=mock.Mock(),
+            execute_cdp_cmd=mock.Mock(return_value={"success": True}),
+            add_cookie=mock.Mock(),
+        )
+
+        imported = protocol_register._hydrate_browser_driver_with_protocol_session_cookies(
+            driver,
+            session=session,
+        )
+
+        self.assertEqual(1, imported)
+        command, payload = driver.execute_cdp_cmd.call_args.args
+        self.assertEqual("Network.setCookie", command)
+        self.assertEqual(".openai.com", payload["domain"])
+        self.assertNotIn("url", payload)
+        self.assertFalse(payload["httpOnly"])
+        self.assertEqual("Strict", payload["sameSite"])
+        driver.add_cookie.assert_not_called()
+
+    def test_browser_cookie_hydration_falls_back_on_ambiguous_cdp_result(self) -> None:
+        cookie = SimpleNamespace(
+            name="session",
+            value="test-value",
+            domain="chatgpt.com",
+            domain_specified=False,
+            path="/",
+            secure=False,
+            expires=None,
+            _rest={"HttpOnly": None, "SameSite": "None"},
+        )
+        session = SimpleNamespace(cookies=[cookie])
+        driver = SimpleNamespace(
+            get=mock.Mock(),
+            execute_cdp_cmd=mock.Mock(return_value={}),
+            add_cookie=mock.Mock(),
+        )
+
+        imported = protocol_register._hydrate_browser_driver_with_protocol_session_cookies(
+            driver,
+            session=session,
+        )
+
+        self.assertEqual(1, imported)
+        command, cdp_payload = driver.execute_cdp_cmd.call_args.args
+        self.assertEqual("Network.setCookie", command)
+        self.assertEqual("https://chatgpt.com/", cdp_payload["url"])
+        self.assertNotIn("domain", cdp_payload)
+        self.assertTrue(cdp_payload["secure"])
+        self.assertTrue(cdp_payload["httpOnly"])
+        self.assertEqual("None", cdp_payload["sameSite"])
+        fallback_payload = driver.add_cookie.call_args.args[0]
+        self.assertNotIn("domain", fallback_payload)
+        self.assertTrue(fallback_payload["secure"])
+        self.assertTrue(fallback_payload["httpOnly"])
+        self.assertEqual("None", fallback_payload["sameSite"])
+
+    def test_codex_account_picker_entry_url_prefers_trusted_picker_location(self) -> None:
+        response = SimpleNamespace(
+            url="https://auth.openai.com/oauth/resume?state=state_123",
+            headers={"Location": "/choose-an-account?state=state_123"},
+        )
+
+        entry_url = protocol_register._codex_account_picker_entry_url(
+            response,
+            fallback_url="https://auth.openai.com/oauth/authorize?state=state_123",
+        )
+
+        self.assertEqual(
+            "https://auth.openai.com/choose-an-account?state=state_123",
+            entry_url,
+        )
+
+    def test_codex_account_picker_entry_url_rejects_untrusted_redirects(self) -> None:
+        response = SimpleNamespace(
+            url="https://untrusted.example/choose-an-account",
+            headers={"Location": "https://untrusted.example/choose-an-account"},
+        )
+
+        entry_url = protocol_register._codex_account_picker_entry_url(
+            response,
+            fallback_url="https://untrusted.example/oauth/authorize",
+        )
+
+        self.assertEqual("", entry_url)
+
+    def test_codex_account_picker_detection_rejects_login_html_copy(self) -> None:
+        response = SimpleNamespace(
+            url="https://auth.openai.com/log-in",
+            headers={},
+            text="<html><body>Sign in or choose an account to continue</body></html>",
+        )
+
+        self.assertFalse(protocol_register._is_codex_account_picker_response(response))
+        self.assertEqual(
+            "",
+            protocol_register._codex_account_picker_entry_url(
+                response,
+                fallback_url="https://auth.openai.com/oauth/authorize?state=state_123",
+            ),
+        )
+
+    def test_browser_codex_action_result_and_diagnostics_are_value_safe(self) -> None:
+        driver = mock.Mock()
+        native_click_target = mock.Mock()
+        driver.execute_script.side_effect = [
+            {
+                "target": native_click_target,
+                "kind": "account",
+                "mode": "identity_ranked",
+                "tag": "BUTTON",
+                "isButton": True,
+                "disabled": False,
+                "ariaDisabled": "absent",
+                "buttonType": "button",
+                "hasForm": False,
+                "hasOnClick": True,
+                "hasReactOnClick": True,
+            },
+            {
+                "accountBoundaryCount": 1,
+                "accountBusinessButtonCount": 0,
+                "accountButtonWithFormCount": 1,
+                "accountButtonWithOnClickCount": 0,
+                "accountClickableButtonCount": 1,
+                "accountContinueButtonCount": 0,
+                "accountEligibleButtonCount": 1,
+                "accountForeignButtonCount": 1,
+                "accountOtherButtonCount": 0,
+                "accountPersonalButtonCount": 1,
+                "accountPickerUrl": True,
+                "accountRejectedButtonCount": 1,
+                "accountTeamButtonCount": 0,
+                "accountVisibleButtonCount": 2,
+                "bodyTextLength": 120,
+                "elementCount": 25,
+                "buttonCount": 1,
+                "anchorCount": 0,
+                "formCount": 1,
+                "inputCount": 2,
+                "roleButtonCount": 0,
+                "roleOptionCount": 1,
+                "tabIndexCount": 1,
+                "iframeCount": 0,
+                "accountSemanticCount": 1,
+                "emailMatchCount": 3,
+                "workspaceMatchCount": 2,
+                "consentUrl": False,
+                "hasBody": True,
+                "unexpectedSensitiveValue": "must-not-escape",
+            },
+        ]
+
+        action = protocol_register._browser_try_click_codex_oauth_action(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+        diagnostics = protocol_register._browser_codex_action_diagnostics(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+
+        self.assertEqual("account", action)
+        native_click_target.click.assert_called_once_with()
+        self.assertEqual(
+            {
+                "mode": "identity_ranked",
+                "tag": "button",
+                "isButton": True,
+                "disabled": False,
+                "ariaDisabled": "absent",
+                "buttonType": "button",
+                "hasForm": False,
+                "hasOnClick": True,
+                "hasReactOnClick": True,
+            },
+            driver._protocol_last_codex_action_metadata,
+        )
+        self.assertEqual(1, diagnostics["accountBoundaryCount"])
+        self.assertEqual(0, diagnostics["accountBusinessButtonCount"])
+        self.assertEqual(1, diagnostics["accountButtonWithFormCount"])
+        self.assertEqual(0, diagnostics["accountButtonWithOnClickCount"])
+        self.assertEqual(1, diagnostics["accountClickableButtonCount"])
+        self.assertEqual(0, diagnostics["accountContinueButtonCount"])
+        self.assertEqual(1, diagnostics["accountEligibleButtonCount"])
+        self.assertEqual(1, diagnostics["accountForeignButtonCount"])
+        self.assertEqual(0, diagnostics["accountOtherButtonCount"])
+        self.assertEqual(1, diagnostics["accountPersonalButtonCount"])
+        self.assertEqual(1, diagnostics["accountRejectedButtonCount"])
+        self.assertEqual(0, diagnostics["accountTeamButtonCount"])
+        self.assertEqual(2, diagnostics["accountVisibleButtonCount"])
+        self.assertTrue(diagnostics["accountPickerUrl"])
+        self.assertFalse(diagnostics["consentUrl"])
+        self.assertEqual(3, diagnostics["emailMatchCount"])
+        self.assertEqual(2, diagnostics["workspaceMatchCount"])
+        self.assertTrue(diagnostics["hasBody"])
+        self.assertNotIn("unexpectedSensitiveValue", diagnostics)
+        self.assertEqual(2, driver.execute_script.call_count)
+        self.assertEqual("user@example.com", driver.execute_script.call_args_list[0].args[1])
+        self.assertEqual("workspace-personal", driver.execute_script.call_args_list[0].args[2])
+        action_script = driver.execute_script.call_args_list[0].args[0]
+        diagnostics_script = driver.execute_script.call_args_list[1].args[0]
+        self.assertNotIn('[data-testid*="account" i]', action_script)
+        self.assertNotIn('[class*="account" i]', action_script)
+        self.assertNotIn("'[class], [id]'", action_script)
+        self.assertIn("current.getAttribute('aria-hidden') === 'true'", action_script)
+        self.assertIn("targetContainsMultipleIdentities", action_script)
+        self.assertIn("targetContainsForeignIdentity", action_script)
+        self.assertIn("fullDescriptor(boundary)", action_script)
+        self.assertIn("emailTokens.includes(email)", action_script)
+        self.assertNotIn("descriptor.includes(email)", action_script)
+        self.assertNotIn("descriptor.includes(preferredWorkspaceId)", action_script)
+        self.assertNotIn(
+            "if (email || preferredWorkspaceId) {\n                return { clicked: false, kind: '' };",
+            action_script,
+        )
+        self.assertIn("genericTargets.size > 1", action_script)
+        self.assertIn("genericTargets.size === 1", action_script)
+        self.assertIn("if (email || preferredWorkspaceId)", action_script)
+        self.assertIn("accountButtonTargets.size !== 1", action_script)
+        self.assertIn("topIdentityTargets.has(element)", action_script)
+        self.assertIn("tiedAccountButtonTargets.size === 1", action_script)
+        self.assertIn("rejectedAccountAction", action_script)
+        self.assertIn("use another(?: account)?|choose another(?: account)?|switch account", action_script)
+        self.assertIn("log in|sign in|create account|register|continue with", action_script)
+        self.assertIn("element.form || element.closest('form')", action_script)
+        self.assertIn("actionUrl.origin !== location.origin", action_script)
+        self.assertIn("consentCandidates.size !== 1", action_script)
+        self.assertIn("window.__easyProtocolCodexActionProbe", action_script)
+        self.assertIn("target.getAttribute('aria-disabled')", action_script)
+        self.assertIn("target.getAttribute('type') || target.type", action_script)
+        self.assertIn("typeof reactProps.onClick === 'function'", action_script)
+        self.assertIn("event.isTrusted", action_script)
+        self.assertIn("const wrappedFetch = originalFetch ? function()", action_script)
+        self.assertIn("const wrappedXhrSend = originalXhrSend ? function()", action_script)
+        self.assertIn("actionHost.endsWith('.openai.com')", action_script)
+        self.assertIn("actionHost.endsWith('.chatgpt.com')", action_script)
+        self.assertIn("responsePromise.then(", action_script)
+        self.assertIn("window.fetch === wrappedFetch", action_script)
+        self.assertIn("xhrPrototype.send === wrappedXhrSend", action_script)
+        self.assertNotIn("element.click()", action_script)
+        self.assertNotIn("clickTarget", action_script)
+        self.assertIn("selectedTarget(target, 'account', 'identity_tied_button')", action_script)
+        self.assertNotIn('[data-testid*="account" i]', diagnostics_script)
+        self.assertIn("leafBoundaryCount > 1", diagnostics_script)
+
+    def test_browser_codex_action_native_click_failure_is_not_counted(self) -> None:
+        driver = mock.Mock()
+        native_click_target = mock.Mock()
+        native_click_target.click.side_effect = RuntimeError("intercepted")
+        driver.execute_script.return_value = {
+            "target": native_click_target,
+            "kind": "account",
+        }
+
+        action = protocol_register._browser_try_click_codex_oauth_action(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+
+        self.assertEqual("", action)
+        native_click_target.click.assert_called_once_with()
+        self.assertEqual(2, driver.execute_script.call_count)
+        cleanup_script = driver.execute_script.call_args_list[1].args[0]
+        self.assertIn("probe.cleanup()", cleanup_script)
+
+    def test_browser_codex_account_picker_click_is_single_flight_per_page(self) -> None:
+        driver = mock.Mock()
+        driver.current_url = "https://auth.openai.com/choose-an-account?secret=must-not-persist"
+        native_click_target = mock.Mock()
+        driver.execute_script.return_value = {
+            "target": native_click_target,
+            "kind": "account",
+        }
+
+        first_action = protocol_register._browser_try_click_codex_oauth_action(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+        second_action = protocol_register._browser_try_click_codex_oauth_action(
+            driver,
+            default_email="user@example.com",
+            preferred_workspace_id="workspace-personal",
+        )
+
+        self.assertEqual("account", first_action)
+        self.assertEqual("", second_action)
+        native_click_target.click.assert_called_once_with()
+        driver.execute_script.assert_called_once()
+        self.assertEqual(
+            "auth.openai.com/choose-an-account",
+            driver._protocol_last_codex_account_picker_action_key,
+        )
+        self.assertNotIn("secret", driver._protocol_last_codex_account_picker_action_key)
+
+    def test_codex_auth_root_url_is_query_insensitive_and_host_strict(self) -> None:
+        self.assertTrue(
+            protocol_register._is_codex_auth_root_url(
+                "https://auth.openai.com/?state=must-not-persist"
+            )
+        )
+        self.assertFalse(
+            protocol_register._is_codex_auth_root_url(
+                "https://auth.openai.com/choose-an-account?state=must-not-persist"
+            )
+        )
+        self.assertFalse(protocol_register._is_codex_auth_root_url("https://example.invalid/"))
+
+    def test_codex_browser_handoff_error_code_drops_detail(self) -> None:
+        code = protocol_register._codex_browser_handoff_error_code(
+            RuntimeError("codex_browser_handoff_incomplete secret=must-not-escape")
+        )
+
+        self.assertEqual("codex_browser_handoff_incomplete", code)
+        self.assertNotIn("secret", code)
+
+    def test_browser_codex_action_probe_is_value_safe(self) -> None:
+        driver = mock.Mock()
+        driver.execute_script.return_value = {
+            "available": True,
+            "targetConnected": False,
+            "captureCount": 2,
+            "trustedCaptureCount": 2,
+            "bubbleCount": 1,
+            "defaultPrevented": True,
+            "mutationCount": 5000,
+            "formSubmitCount": 1,
+            "windowErrorCount": 2,
+            "unhandledRejectionCount": 3,
+            "resourceErrorCount": 4,
+            "resourceCount": 5,
+            "resourceFetchCount": 2,
+            "resourceXhrCount": 1,
+            "resourceStatusUnknownCount": 1,
+            "resource2xxCount": 2,
+            "resource3xxCount": 0,
+            "resource4xxCount": 1,
+            "resource5xxCount": 1,
+            "resource400Count": 1,
+            "resource401Count": 2,
+            "resource403Count": 3,
+            "resource404Count": 4,
+            "resource409Count": 5,
+            "resource429Count": 6,
+            "resourceOther4xxCount": 7,
+            "resourceAuthAccounts4xxCount": 8,
+            "resourceOauth4xxCount": 9,
+            "resourceCodex4xxCount": 10,
+            "resourceAuthOther4xxCount": 11,
+            "resourceExternal4xxCount": 12,
+            "resource403FetchCount": 13,
+            "resource403XhrCount": 14,
+            "resource403ApiCount": 15,
+            "resource403BackendApiCount": 16,
+            "resource403CdnCount": 17,
+            "resource403PickerCount": 18,
+            "resource403StaticCount": 19,
+            "resource403OtherAuthCount": 20,
+            "resourceActionAuthAccountsCount": 21,
+            "resourceActionOauthCount": 22,
+            "resourceActionCodexCount": 23,
+            "resourceActionApiCount": 24,
+            "resourceActionBackendApiCount": 25,
+            "resourceActionCdnCount": 26,
+            "resourceActionPickerCount": 27,
+            "resourceActionStaticCount": 28,
+            "resourceActionOtherAuthCount": 29,
+            "resourceActionExternalCount": 30,
+            "fetchCallCount": 31,
+            "xhrSendCount": 32,
+            "actionAuthAccountsCallCount": 33,
+            "actionOauthCallCount": 34,
+            "actionCodexCallCount": 35,
+            "actionApiCallCount": 36,
+            "actionBackendApiCallCount": 37,
+            "actionCdnCallCount": 38,
+            "actionPickerCallCount": 39,
+            "actionStaticCallCount": 40,
+            "actionOtherAuthCallCount": 41,
+            "actionExternalCallCount": 42,
+            "actionOpenAiCallCount": 43,
+            "actionChatgptCallCount": 44,
+            "actionNonHttpCallCount": 45,
+            "actionThirdPartyCallCount": 46,
+            "fetchResolvedCount": 47,
+            "fetchRejectedCount": 48,
+            "fetch4xxCount": 49,
+            "fetch5xxCount": 50,
+            "unexpectedSensitiveValue": "must-not-escape",
+        }
+
+        probe = protocol_register._browser_codex_action_probe(driver)
+
+        self.assertEqual(
+            {
+                "available": True,
+                "targetConnected": False,
+                "defaultPrevented": True,
+                "captureCount": 2,
+                "trustedCaptureCount": 2,
+                "bubbleCount": 1,
+                "mutationCount": 999,
+                "formSubmitCount": 1,
+                "windowErrorCount": 2,
+                "unhandledRejectionCount": 3,
+                "resourceErrorCount": 4,
+                "resourceCount": 5,
+                "resourceFetchCount": 2,
+                "resourceXhrCount": 1,
+                "resourceStatusUnknownCount": 1,
+                "resource2xxCount": 2,
+                "resource3xxCount": 0,
+                "resource4xxCount": 1,
+                "resource5xxCount": 1,
+                "resource400Count": 1,
+                "resource401Count": 2,
+                "resource403Count": 3,
+                "resource404Count": 4,
+                "resource409Count": 5,
+                "resource429Count": 6,
+                "resourceOther4xxCount": 7,
+                "resourceAuthAccounts4xxCount": 8,
+                "resourceOauth4xxCount": 9,
+                "resourceCodex4xxCount": 10,
+                "resourceAuthOther4xxCount": 11,
+                "resourceExternal4xxCount": 12,
+                "resource403FetchCount": 13,
+                "resource403XhrCount": 14,
+                "resource403ApiCount": 15,
+                "resource403BackendApiCount": 16,
+                "resource403CdnCount": 17,
+                "resource403PickerCount": 18,
+                "resource403StaticCount": 19,
+                "resource403OtherAuthCount": 20,
+                "resourceActionAuthAccountsCount": 21,
+                "resourceActionOauthCount": 22,
+                "resourceActionCodexCount": 23,
+                "resourceActionApiCount": 24,
+                "resourceActionBackendApiCount": 25,
+                "resourceActionCdnCount": 26,
+                "resourceActionPickerCount": 27,
+                "resourceActionStaticCount": 28,
+                "resourceActionOtherAuthCount": 29,
+                "resourceActionExternalCount": 30,
+                "fetchCallCount": 31,
+                "xhrSendCount": 32,
+                "actionAuthAccountsCallCount": 33,
+                "actionOauthCallCount": 34,
+                "actionCodexCallCount": 35,
+                "actionApiCallCount": 36,
+                "actionBackendApiCallCount": 37,
+                "actionCdnCallCount": 38,
+                "actionPickerCallCount": 39,
+                "actionStaticCallCount": 40,
+                "actionOtherAuthCallCount": 41,
+                "actionExternalCallCount": 42,
+                "actionOpenAiCallCount": 43,
+                "actionChatgptCallCount": 44,
+                "actionNonHttpCallCount": 45,
+                "actionThirdPartyCallCount": 46,
+                "fetchResolvedCount": 47,
+                "fetchRejectedCount": 48,
+                "fetch4xxCount": 49,
+                "fetch5xxCount": 50,
+            },
+            probe,
+        )
+        self.assertNotIn("unexpectedSensitiveValue", probe)
+        probe_script = driver.execute_script.call_args.args[0]
+        self.assertIn("window.__easyProtocolCodexActionProbe", probe_script)
+        self.assertIn("probe.cleanup()", probe_script)
+        self.assertIn("window.__easyProtocolCodexActionProbe = null", probe_script)
+        self.assertIn("performance.getEntriesByType('resource')", probe_script)
+        self.assertIn("entry.responseStatus", probe_script)
+        self.assertIn("entry.name", probe_script)
+        self.assertIn("resourceAuthAccounts4xxCount", probe_script)
+        self.assertIn("resourceActionAuthAccountsCount", probe_script)
+        self.assertIn("initiatorType === 'fetch' || initiatorType === 'xmlhttprequest'", probe_script)
+        self.assertNotIn("resourceUrl", probe)
+
+    def test_browser_codex_action_probe_attempts_cleanup_after_script_failure(self) -> None:
+        driver = mock.Mock()
+        driver.execute_script.side_effect = [RuntimeError("transient"), None]
+
+        probe = protocol_register._browser_codex_action_probe(driver)
+
+        self.assertFalse(probe["available"])
+        self.assertEqual(2, driver.execute_script.call_count)
+        cleanup_script = driver.execute_script.call_args_list[1].args[0]
+        self.assertIn("probe.cleanup()", cleanup_script)
+        self.assertIn("window.__easyProtocolCodexActionProbe = null", cleanup_script)
+
+    def test_browser_codex_switches_only_to_one_new_window(self) -> None:
+        driver = SimpleNamespace(
+            window_handles=["existing", "new"],
+            switch_to=SimpleNamespace(
+                window=mock.Mock(),
+                default_content=mock.Mock(),
+            ),
+        )
+
+        opened, switched = protocol_register._browser_switch_to_single_new_window(
+            driver,
+            before_handles=["existing"],
+        )
+
+        self.assertTrue(opened)
+        self.assertTrue(switched)
+        driver.switch_to.window.assert_called_once_with("new")
+        driver.switch_to.default_content.assert_called_once_with()
+
+        driver.window_handles = ["existing", "new", "other"]
+        driver.switch_to.window.reset_mock()
+        opened, switched = protocol_register._browser_switch_to_single_new_window(
+            driver,
+            before_handles=["existing"],
+        )
+        self.assertTrue(opened)
+        self.assertFalse(switched)
+        driver.switch_to.window.assert_not_called()
+
+    def test_browser_codex_action_transition_diagnostics_do_not_emit_urls(self) -> None:
+        transition = protocol_register._browser_codex_action_transition_diagnostics(
+            action_kind="account",
+            before_url="https://example.invalid/choose?secret=before",
+            after_url="https://example.invalid/next?secret=after",
+            action_metadata={
+                "mode": "identity_ranked",
+                "tag": "button",
+                "isButton": True,
+                "disabled": False,
+                "ariaDisabled": "absent",
+                "buttonType": "button",
+                "hasForm": False,
+                "hasOnClick": True,
+                "hasReactOnClick": True,
+            },
+            action_probe={
+                "available": True,
+                "targetConnected": False,
+                "captureCount": 1,
+                "trustedCaptureCount": 1,
+                "bubbleCount": 1,
+                "defaultPrevented": True,
+                "mutationCount": 4,
+                "formSubmitCount": 1,
+                "windowErrorCount": 2,
+                "unhandledRejectionCount": 3,
+                "resourceErrorCount": 4,
+                "resourceCount": 5,
+                "resourceFetchCount": 2,
+                "resourceXhrCount": 1,
+                "resourceStatusUnknownCount": 1,
+                "resource2xxCount": 2,
+                "resource3xxCount": 0,
+                "resource4xxCount": 1,
+                "resource5xxCount": 1,
+                "resource400Count": 1,
+                "resource401Count": 0,
+                "resource403Count": 0,
+                "resource404Count": 0,
+                "resource409Count": 0,
+                "resource429Count": 0,
+                "resourceOther4xxCount": 0,
+                "resourceAuthAccounts4xxCount": 1,
+                "resourceOauth4xxCount": 0,
+                "resourceCodex4xxCount": 0,
+                "resourceAuthOther4xxCount": 0,
+                "resourceExternal4xxCount": 0,
+                "resource403FetchCount": 1,
+                "resource403XhrCount": 0,
+                "resource403ApiCount": 1,
+                "resource403BackendApiCount": 0,
+                "resource403CdnCount": 0,
+                "resource403PickerCount": 0,
+                "resource403StaticCount": 0,
+                "resource403OtherAuthCount": 0,
+                "resourceActionAuthAccountsCount": 2,
+                "resourceActionOauthCount": 1,
+                "resourceActionCodexCount": 3,
+                "resourceActionApiCount": 4,
+                "resourceActionBackendApiCount": 5,
+                "resourceActionCdnCount": 6,
+                "resourceActionPickerCount": 7,
+                "resourceActionStaticCount": 8,
+                "resourceActionOtherAuthCount": 9,
+                "resourceActionExternalCount": 10,
+                "fetchCallCount": 31,
+                "xhrSendCount": 32,
+                "actionAuthAccountsCallCount": 33,
+                "actionOauthCallCount": 34,
+                "actionCodexCallCount": 35,
+                "actionApiCallCount": 36,
+                "actionBackendApiCallCount": 37,
+                "actionCdnCallCount": 38,
+                "actionPickerCallCount": 39,
+                "actionStaticCallCount": 40,
+                "actionOtherAuthCallCount": 41,
+                "actionExternalCallCount": 42,
+                "actionOpenAiCallCount": 43,
+                "actionChatgptCallCount": 44,
+                "actionNonHttpCallCount": 45,
+                "actionThirdPartyCallCount": 46,
+                "fetchResolvedCount": 47,
+                "fetchRejectedCount": 48,
+                "fetch4xxCount": 49,
+                "fetch5xxCount": 50,
+            },
+            new_window_opened=True,
+            new_window_switched=True,
+            after_diagnostics={
+                "accountClickableButtonCount": 2,
+                "accountPersonalButtonCount": 1,
+                "accountTeamButtonCount": 1,
+                "accountPickerUrl": True,
+                "consentUrl": False,
+                "hasBody": True,
+            },
+        )
+
+        self.assertEqual("account", transition["actionKind"])
+        self.assertEqual("identity_ranked", transition["actionMode"])
+        self.assertEqual("button", transition["targetTag"])
+        self.assertTrue(transition["targetIsButton"])
+        self.assertFalse(transition["targetDisabled"])
+        self.assertEqual("absent", transition["targetAriaDisabled"])
+        self.assertEqual("button", transition["targetButtonType"])
+        self.assertFalse(transition["targetHasForm"])
+        self.assertTrue(transition["targetHasOnClick"])
+        self.assertTrue(transition["targetHasReactOnClick"])
+        self.assertTrue(transition["clickProbeAvailable"])
+        self.assertFalse(transition["targetConnectedAfter"])
+        self.assertTrue(transition["clickDefaultPrevented"])
+        self.assertEqual(1, transition["captureCount"])
+        self.assertEqual(1, transition["trustedCaptureCount"])
+        self.assertEqual(1, transition["bubbleCount"])
+        self.assertEqual(4, transition["mutationCount"])
+        self.assertTrue(transition["newWindowOpened"])
+        self.assertTrue(transition["newWindowSwitched"])
+        self.assertEqual(1, transition["formSubmitCount"])
+        self.assertEqual(2, transition["windowErrorCount"])
+        self.assertEqual(3, transition["unhandledRejectionCount"])
+        self.assertEqual(4, transition["resourceErrorCount"])
+        self.assertEqual(5, transition["resourceCount"])
+        self.assertEqual(2, transition["resourceFetchCount"])
+        self.assertEqual(1, transition["resourceXhrCount"])
+        self.assertEqual(1, transition["resourceStatusUnknownCount"])
+        self.assertEqual(2, transition["resource2xxCount"])
+        self.assertEqual(1, transition["resource4xxCount"])
+        self.assertEqual(1, transition["resource5xxCount"])
+        self.assertEqual(1, transition["resource400Count"])
+        self.assertEqual(1, transition["resourceAuthAccounts4xxCount"])
+        self.assertEqual(0, transition["resourceExternal4xxCount"])
+        self.assertEqual(1, transition["resource403FetchCount"])
+        self.assertEqual(1, transition["resource403ApiCount"])
+        self.assertEqual(2, transition["resourceActionAuthAccountsCount"])
+        self.assertEqual(3, transition["resourceActionCodexCount"])
+        self.assertEqual(10, transition["resourceActionExternalCount"])
+        self.assertEqual(31, transition["fetchCallCount"])
+        self.assertEqual(32, transition["xhrSendCount"])
+        self.assertEqual(33, transition["actionAuthAccountsCallCount"])
+        self.assertEqual(35, transition["actionCodexCallCount"])
+        self.assertEqual(42, transition["actionExternalCallCount"])
+        self.assertEqual(43, transition["actionOpenAiCallCount"])
+        self.assertEqual(44, transition["actionChatgptCallCount"])
+        self.assertEqual(45, transition["actionNonHttpCallCount"])
+        self.assertEqual(46, transition["actionThirdPartyCallCount"])
+        self.assertEqual(47, transition["fetchResolvedCount"])
+        self.assertEqual(48, transition["fetchRejectedCount"])
+        self.assertEqual(49, transition["fetch4xxCount"])
+        self.assertEqual(50, transition["fetch5xxCount"])
+        self.assertTrue(transition["urlChanged"])
+        self.assertEqual(2, transition["accountClickableButtonCount"])
+        self.assertEqual(1, transition["accountPersonalButtonCount"])
+        self.assertEqual(1, transition["accountTeamButtonCount"])
+        serialized = json.dumps(transition, sort_keys=True)
+        self.assertNotIn("example.invalid", serialized)
+        self.assertNotIn("secret", serialized)
+
+    def test_browser_codex_action_trace_summary_has_constant_size(self) -> None:
+        transition = protocol_register._browser_codex_action_transition_diagnostics(
+            action_kind="account",
+            before_url="https://example.invalid/before?secret=before",
+            after_url="https://example.invalid/after?secret=after",
+            action_metadata={
+                "mode": "identity_ranked",
+                "tag": "button",
+                "isButton": True,
+                "disabled": False,
+                "ariaDisabled": "absent",
+                "buttonType": "button",
+                "hasForm": False,
+                "hasOnClick": True,
+                "hasReactOnClick": True,
+            },
+            action_probe={
+                "available": True,
+                "targetConnected": True,
+                "captureCount": 1,
+                "trustedCaptureCount": 1,
+                "bubbleCount": 1,
+                "defaultPrevented": False,
+                "mutationCount": 3,
+                "formSubmitCount": 1,
+                "windowErrorCount": 2,
+                "unhandledRejectionCount": 3,
+                "resourceErrorCount": 4,
+                "resourceCount": 5,
+                "resourceFetchCount": 2,
+                "resourceXhrCount": 1,
+                "resourceStatusUnknownCount": 1,
+                "resource2xxCount": 2,
+                "resource3xxCount": 0,
+                "resource4xxCount": 1,
+                "resource5xxCount": 1,
+                "resource400Count": 1,
+                "resource401Count": 2,
+                "resource403Count": 3,
+                "resource404Count": 4,
+                "resource409Count": 5,
+                "resource429Count": 6,
+                "resourceOther4xxCount": 7,
+                "resourceAuthAccounts4xxCount": 8,
+                "resourceOauth4xxCount": 9,
+                "resourceCodex4xxCount": 10,
+                "resourceAuthOther4xxCount": 11,
+                "resourceExternal4xxCount": 12,
+                "resource403FetchCount": 13,
+                "resource403XhrCount": 14,
+                "resource403ApiCount": 15,
+                "resource403BackendApiCount": 16,
+                "resource403CdnCount": 17,
+                "resource403PickerCount": 18,
+                "resource403StaticCount": 19,
+                "resource403OtherAuthCount": 20,
+                "resourceActionAuthAccountsCount": 21,
+                "resourceActionOauthCount": 22,
+                "resourceActionCodexCount": 23,
+                "resourceActionApiCount": 24,
+                "resourceActionBackendApiCount": 25,
+                "resourceActionCdnCount": 26,
+                "resourceActionPickerCount": 27,
+                "resourceActionStaticCount": 28,
+                "resourceActionOtherAuthCount": 29,
+                "resourceActionExternalCount": 30,
+                "fetchCallCount": 31,
+                "xhrSendCount": 32,
+                "actionAuthAccountsCallCount": 33,
+                "actionOauthCallCount": 34,
+                "actionCodexCallCount": 35,
+                "actionApiCallCount": 36,
+                "actionBackendApiCallCount": 37,
+                "actionCdnCallCount": 38,
+                "actionPickerCallCount": 39,
+                "actionStaticCallCount": 40,
+                "actionOtherAuthCallCount": 41,
+                "actionExternalCallCount": 42,
+                "actionOpenAiCallCount": 43,
+                "actionChatgptCallCount": 44,
+                "actionNonHttpCallCount": 45,
+                "actionThirdPartyCallCount": 46,
+                "fetchResolvedCount": 47,
+                "fetchRejectedCount": 48,
+                "fetch4xxCount": 49,
+                "fetch5xxCount": 50,
+            },
+            after_diagnostics={
+                "accountClickableButtonCount": 1,
+                "accountOtherButtonCount": 1,
+                "accountPickerUrl": True,
+                "consentUrl": False,
+                "hasBody": True,
+            },
+        )
+        summary: dict[str, int | bool | str] = {}
+        for _ in range(100):
+            summary = protocol_register._browser_codex_action_trace_summary(summary, transition)
+
+        self.assertEqual(100, summary["count"])
+        self.assertEqual(100, summary["urlChangedCount"])
+        self.assertEqual(100, summary["accountPickerAfterCount"])
+        self.assertEqual(1, summary["lastAccountClickableButtonCount"])
+        self.assertEqual("identity_ranked", summary["lastActionMode"])
+        self.assertEqual("button", summary["lastTargetTag"])
+        self.assertTrue(summary["lastTargetIsButton"])
+        self.assertEqual("button", summary["lastTargetButtonType"])
+        self.assertTrue(summary["lastTargetHasOnClick"])
+        self.assertTrue(summary["lastTargetHasReactOnClick"])
+        self.assertTrue(summary["lastClickProbeAvailable"])
+        self.assertTrue(summary["lastTargetConnectedAfter"])
+        self.assertEqual(1, summary["lastCaptureCount"])
+        self.assertEqual(1, summary["lastTrustedCaptureCount"])
+        self.assertEqual(1, summary["lastBubbleCount"])
+        self.assertEqual(3, summary["lastMutationCount"])
+        self.assertEqual(1, summary["lastFormSubmitCount"])
+        self.assertEqual(2, summary["lastWindowErrorCount"])
+        self.assertEqual(3, summary["lastUnhandledRejectionCount"])
+        self.assertEqual(4, summary["lastResourceErrorCount"])
+        self.assertEqual(5, summary["lastResourceCount"])
+        self.assertEqual(2, summary["lastResourceFetchCount"])
+        self.assertEqual(1, summary["lastResourceXhrCount"])
+        self.assertEqual(1, summary["lastResourceStatusUnknownCount"])
+        self.assertEqual(2, summary["lastResource2xxCount"])
+        self.assertEqual(1, summary["lastResource4xxCount"])
+        self.assertEqual(1, summary["lastResource5xxCount"])
+        self.assertEqual(3, summary["lastResource403Count"])
+        self.assertEqual(13, summary["lastResource403FetchCount"])
+        self.assertEqual(14, summary["lastResource403XhrCount"])
+        self.assertEqual(15, summary["lastResource403ApiCount"])
+        self.assertEqual(16, summary["lastResource403BackendApiCount"])
+        self.assertEqual(17, summary["lastResource403CdnCount"])
+        self.assertEqual(18, summary["lastResource403PickerCount"])
+        self.assertEqual(19, summary["lastResource403StaticCount"])
+        self.assertEqual(20, summary["lastResource403OtherAuthCount"])
+        self.assertEqual(21, summary["lastResourceActionAuthAccountsCount"])
+        self.assertEqual(22, summary["lastResourceActionOauthCount"])
+        self.assertEqual(23, summary["lastResourceActionCodexCount"])
+        self.assertEqual(24, summary["lastResourceActionApiCount"])
+        self.assertEqual(25, summary["lastResourceActionBackendApiCount"])
+        self.assertEqual(26, summary["lastResourceActionCdnCount"])
+        self.assertEqual(27, summary["lastResourceActionPickerCount"])
+        self.assertEqual(28, summary["lastResourceActionStaticCount"])
+        self.assertEqual(29, summary["lastResourceActionOtherAuthCount"])
+        self.assertEqual(30, summary["lastResourceActionExternalCount"])
+        self.assertEqual(31, summary["lastFetchCallCount"])
+        self.assertEqual(32, summary["lastXhrSendCount"])
+        self.assertEqual(33, summary["lastActionAuthAccountsCallCount"])
+        self.assertEqual(34, summary["lastActionOauthCallCount"])
+        self.assertEqual(35, summary["lastActionCodexCallCount"])
+        self.assertEqual(36, summary["lastActionApiCallCount"])
+        self.assertEqual(37, summary["lastActionBackendApiCallCount"])
+        self.assertEqual(38, summary["lastActionCdnCallCount"])
+        self.assertEqual(39, summary["lastActionPickerCallCount"])
+        self.assertEqual(40, summary["lastActionStaticCallCount"])
+        self.assertEqual(41, summary["lastActionOtherAuthCallCount"])
+        self.assertEqual(42, summary["lastActionExternalCallCount"])
+        self.assertEqual(43, summary["lastActionOpenAiCallCount"])
+        self.assertEqual(44, summary["lastActionChatgptCallCount"])
+        self.assertEqual(45, summary["lastActionNonHttpCallCount"])
+        self.assertEqual(46, summary["lastActionThirdPartyCallCount"])
+        self.assertEqual(47, summary["lastFetchResolvedCount"])
+        self.assertEqual(48, summary["lastFetchRejectedCount"])
+        self.assertEqual(49, summary["lastFetch4xxCount"])
+        self.assertEqual(50, summary["lastFetch5xxCount"])
+        serialized = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+        self.assertLess(len(serialized), 3072)
+        self.assertNotIn("example.invalid", serialized)
+        self.assertNotIn("secret", serialized)
+
+        log_payload = protocol_register._browser_codex_action_trace_log_payload(summary)
+        log_serialized = json.dumps(log_payload, separators=(",", ":"))
+        self.assertEqual(100, log_payload["n"])
+        self.assertEqual(100, log_payload["nav"])
+        self.assertEqual(1, log_payload["tr"])
+        self.assertEqual(31, log_payload["fc"])
+        self.assertEqual(32, log_payload["xc"])
+        self.assertEqual(33, log_payload["aa"])
+        self.assertEqual(34, log_payload["ao"])
+        self.assertEqual(35, log_payload["ac"])
+        self.assertEqual(36, log_payload["ai"])
+        self.assertEqual(37, log_payload["ba"])
+        self.assertEqual(42, log_payload["ex"])
+        self.assertEqual(43, log_payload["oi"])
+        self.assertEqual(44, log_payload["cg"])
+        self.assertEqual(45, log_payload["nh"])
+        self.assertEqual(46, log_payload["tp"])
+        self.assertEqual(47, log_payload["fr"])
+        self.assertEqual(48, log_payload["fj"])
+        self.assertEqual(49, log_payload["f4"])
+        self.assertEqual(50, log_payload["f5"])
+        self.assertEqual(3, log_payload["mut"])
+        self.assertFalse(log_payload["dp"])
+        self.assertEqual(1, log_payload["cb"])
+        self.assertEqual(
+            {
+                "n", "nav", "picker", "fc", "xc", "aa", "ao", "ac", "ai", "ba",
+                "ex", "tr", "oi", "cg", "nh", "tp", "fr", "fj", "f4", "f5",
+                "mut", "dp", "cb",
+            },
+            set(log_payload),
+        )
+        self.assertLess(len(log_serialized), 220)
+        self.assertTrue(log_serialized.startswith('{"n":100,"nav":100,'))
+        self.assertNotIn("example.invalid", log_serialized)
+        self.assertNotIn("secret", log_serialized)
+
+        message = protocol_register._browser_codex_handoff_incomplete_message(
+            action_count=100,
+            action_trace=summary,
+            ready_state="complete",
+            final_url="https://example.invalid/choose?secret=not-logged",
+            action_diagnostics={"accountClickableButtonCount": 1},
+        )
+        trace_start = message.index("trace=") + len("trace=")
+        trace_end = message.index(" ready_state=", trace_start)
+        current_start = message.index(" current=", trace_end)
+        diagnostics_start = message.index(" diagnostics=", current_start)
+        message_trace = json.loads(message[trace_start:trace_end])
+
+        self.assertEqual(log_payload, message_trace)
+        self.assertLess(trace_start, current_start)
+        self.assertLess(current_start, diagnostics_start)
+        self.assertNotIn("not-logged", message)
+
+    def test_browser_codex_action_script_failure_is_not_silently_retried(self) -> None:
+        driver = mock.Mock()
+        driver.execute_script.side_effect = ValueError("unsupported browser script")
+
+        with self.assertRaisesRegex(RuntimeError, "codex_browser_action_script_failed"):
+            protocol_register._browser_try_click_codex_oauth_action(
+                driver,
+                default_email="user@example.com",
+                preferred_workspace_id="workspace-personal",
+            )
 
     def test_run_protocol_repair_once_refreshes_oauth_state_from_browser_bootstrap_after_authorize_challenge(self) -> None:
         session = mock.Mock()

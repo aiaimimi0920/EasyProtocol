@@ -11,7 +11,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 DEFAULT_OTP_POLL_INTERVAL_SECONDS = 4
 DEFAULT_MAIL_SERVICE_READY_TIMEOUT_SECONDS = 90
@@ -607,6 +607,8 @@ def wait_openai_code(
     mailtm_api_base: str = "",
     timeout_seconds: int = 180,
     min_mail_id: int = 0,
+    resend_callback: Callable[[int], bool] | None = None,
+    resend_after_seconds: int = 60,
 ) -> str:
     _ = provider
     _ = mailcreate_base_url
@@ -648,7 +650,10 @@ def wait_openai_code(
         f"timeout_seconds={timeout_seconds}"
     )
 
-    deadline = time.time() + max(5, int(timeout_seconds))
+    started_at = time.time()
+    deadline = started_at + max(5, int(timeout_seconds))
+    resend_at = started_at + max(1, int(resend_after_seconds))
+    resend_attempted = False
     poll_interval = max(
         1,
         int(
@@ -697,7 +702,9 @@ def wait_openai_code(
         except Exception as exc:
             last_poll_error = exc
             code_endpoint_failed = True
-        if code_endpoint_failed or time.time() - last_snapshot_probe_at >= snapshot_probe_every:
+        resend_due = resend_callback is not None and not resend_attempted and time.time() >= resend_at
+        snapshot_failed = False
+        if code_endpoint_failed or resend_due or time.time() - last_snapshot_probe_at >= snapshot_probe_every:
             last_snapshot_probe_at = time.time()
             try:
                 snapshot_kwargs = {
@@ -715,7 +722,14 @@ def wait_openai_code(
                     return snapshot_code
             except Exception as exc:
                 last_poll_error = exc
-        time.sleep(poll_interval)
+                snapshot_failed = True
+        if resend_due and not code_endpoint_failed and not snapshot_failed:
+            resend_attempted = True
+            remaining_seconds = max(0, int(deadline - time.time()))
+            # A send rejection must reach the caller, not become a polling error.
+            if remaining_seconds > 0 and resend_callback(remaining_seconds):
+                print("[mailbox] wait_openai_code requested one resend", flush=True)
+        time.sleep(min(poll_interval, max(0, deadline - time.time())))
     detail = f"; last_error={type(last_poll_error).__name__}: {last_poll_error}" if last_poll_error else ""
     raise RuntimeError(f"timeout waiting for 6-digit code{detail}")
 

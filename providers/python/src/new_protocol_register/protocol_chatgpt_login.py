@@ -36,6 +36,7 @@ from shared_mailbox.easy_email_client import get_mailbox_latest_message_id, wait
 from shared_proxy import env_flag, normalize_proxy_env_url
 
 from protocol_runtime.errors import ProtocolRuntimeError, ensure_protocol_runtime_error
+from protocol_runtime.attempt_limits import bounded_attempts
 from protocol_runtime.protocol_register import (
     AUTHORIZE_CONTINUE_URL,
     CHATGPT_BASE,
@@ -66,6 +67,7 @@ from protocol_runtime.protocol_register import (
     _session_request,
     _submit_workspace_selection_for_callback,
     _verify_login_password,
+    export_authenticated_session_context,
     temporary_workspace_selector_overrides,
 )
 
@@ -164,7 +166,8 @@ def _chatgpt_login_request(
     last_exc: BaseException | None = None
     base_timeout = kwargs.pop("timeout", None)
     default_timeout = int(_coerce_positive_timeout_seconds(base_timeout) or 30)
-    for attempt in range(1, 3):
+    max_attempts = bounded_attempts(2)
+    for attempt in range(1, max_attempts + 1):
         request_kwargs = dict(kwargs)
         if deadline is not None:
             request_kwargs["timeout"] = _request_timeout_for_deadline(deadline, default_timeout)
@@ -181,7 +184,7 @@ def _chatgpt_login_request(
             )
         except Exception as exc:
             last_exc = exc
-            if attempt >= 2 or not _chatgpt_login_network_error_is_retryable(exc):
+            if attempt >= max_attempts or not _chatgpt_login_network_error_is_retryable(exc):
                 raise
             print(
                 "[protocol-chatgpt-login] retrying transient request "
@@ -195,6 +198,8 @@ def _chatgpt_login_request(
 
 
 def _chatgpt_login_step_retryable(exc: BaseException) -> bool:
+    if "browser_verification_required" in str(exc or "").lower():
+        return False
     if _chatgpt_login_network_error_is_retryable(exc):
         return True
     text = str(exc or "").strip().lower()
@@ -220,6 +225,7 @@ def _merge_chatgpt_login_details(
     client_bootstrap: dict[str, Any],
     page_type: str,
     network_attempt: int,
+    authenticated_session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     existing_details = (
         seed_payload.get("chatgptLoginDetails") if isinstance(seed_payload.get("chatgptLoginDetails"), dict) else {}
@@ -230,6 +236,8 @@ def _merge_chatgpt_login_details(
         "pageType": page_type,
         "networkAttempt": network_attempt,
     }
+    if authenticated_session:
+        details["authenticatedSession"] = dict(authenticated_session)
     for key in (
         "oauthTokens",
         "refreshToken",
@@ -565,12 +573,17 @@ def run_protocol_chatgpt_login_init_from_path(
 
     explicit_proxy = normalize_proxy_env_url(explicit_proxy) or None
     verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
-    max_network_attempts = 3
+    session_factory = requests.Session
+    if env_flag("PROTOCOL_ENABLE_BROWSER_CHATGPT_SESSION", False):
+        from new_protocol_register.protocol_browser_session import BrowserLoginSession
+
+        session_factory = BrowserLoginSession
+    max_network_attempts = bounded_attempts(3)
     last_exc: BaseException | None = None
     deadline = _deadline_from_timeout_seconds(timeout_seconds)
     for network_attempt in range(1, max_network_attempts + 1):
         _raise_if_login_deadline_exceeded(deadline)
-        session = requests.Session(
+        session = session_factory(
             impersonate="chrome",
             timeout=_request_timeout_for_deadline(deadline, 30),
             verify=verify_tls,
@@ -883,8 +896,16 @@ def run_protocol_chatgpt_login_init_from_path(
                 },
                 page_type=_extract_page_type(oauth_entry_response) or "",
                 network_attempt=network_attempt,
+                authenticated_session=export_authenticated_session_context(
+                    session=session,
+                    user_agent=str(session.headers.get("user-agent") or DEFAULT_PROTOCOL_USER_AGENT),
+                    device_id=device_id,
+                    explicit_proxy=explicit_proxy,
+                ),
             )
             seed_path.write_text(json.dumps(updated_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            if os.name != "nt":
+                os.chmod(seed_path, 0o600)
             return result
         except Exception as exc:
             last_exc = exc

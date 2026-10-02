@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
+FROM --platform=$BUILDPLATFORM golang:1.24-bookworm AS turnstile-builder
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+WORKDIR /src/turnstile-solver
+COPY providers/python/python_shared/src/turnstile_solver_go/go.mod ./
+RUN go mod download
+COPY providers/python/python_shared/src/turnstile_solver_go/ ./
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -o /out/turnstile_solver .
+
 FROM python:3.10-bookworm AS runtime
 WORKDIR /app
 
@@ -23,7 +33,6 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
         chromium \
         chromium-driver \
         fonts-liberation \
-        golang \
         libasound2 \
         libatk-bridge2.0-0 \
         libatk1.0-0 \
@@ -54,6 +63,16 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
         --trusted-host mirrors.aliyun.com \
         -r browser_runtime_requirements.txt \
         boto3 curl-cffi
+
+COPY --from=turnstile-builder /out/turnstile_solver /usr/local/bin/turnstile_solver
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    TURNSTILE_SOLVER_MODE=binary \
+    TURNSTILE_SOLVER_PATH=/usr/local/bin/turnstile_solver \
+    HOME=/tmp/easy-home \
+    XDG_CACHE_HOME=/tmp/easy-cache \
+    XDG_CONFIG_HOME=/tmp/easy-config \
+    XDG_RUNTIME_DIR=/tmp/easy-runtime
 
 EXPOSE 9100
 CMD ["python", "src/server.py"]

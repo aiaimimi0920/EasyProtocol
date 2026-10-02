@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import contextvars
+import hashlib
 import http.cookiejar
 import importlib
 import json
@@ -51,6 +52,7 @@ from shared_proxy import (
     resolve_system_native_proxy_decision,
 )
 from .errors import ProtocolRuntimeError, ensure_protocol_runtime_error
+from .attempt_limits import bounded_attempts
 
 
 AUTH_BASE = "https://auth.openai.com"
@@ -244,6 +246,16 @@ class ProtocolRegistrationResult:
     page_type: str = ""
     final_url: str = ""
     resume_context: dict[str, Any] | None = None
+
+
+class _PhoneWallResponseError(RuntimeError):
+    def __init__(self, *, response: Any, context: str) -> None:
+        self.response = response
+        self.context = str(context or "").strip()
+        page_type = _extract_page_type(response) or "unknown"
+        super().__init__(
+            f"phone_wall context={self.context} page_type={page_type} body={_response_preview(response, 300)}"
+        )
 
 
 @dataclass(frozen=True)
@@ -1484,6 +1496,7 @@ def _import_browser_driver_cookies_into_session(
     session: requests.Session,
     *,
     driver: Any,
+    navigate: bool = True,
 ) -> int:
     imported = 0
     current_url = ""
@@ -1504,12 +1517,13 @@ def _import_browser_driver_cookies_into_session(
         "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
     ]
     seen: set[tuple[str, str, str]] = set()
-    for host_url in seeded_hosts:
+    for host_url in seeded_hosts if navigate else [current_url]:
         normalized_host_url = str(host_url or "").strip()
         if not normalized_host_url:
             continue
         try:
-            driver.get(normalized_host_url)
+            if navigate:
+                driver.get(normalized_host_url)
             cookies = driver.get_cookies() or []
         except Exception:
             continue
@@ -1522,6 +1536,8 @@ def _import_browser_driver_cookies_into_session(
             domain = str(cookie.get("domain") or "").strip() or fallback_domain
             path = str(cookie.get("path") or "/").strip() or "/"
             if not name or not domain:
+                continue
+            if not navigate and (name == "cf_clearance" or name.startswith(("_cf", "__cf"))):
                 continue
             dedupe_key = (name, domain, path)
             if dedupe_key in seen:
@@ -1539,6 +1555,24 @@ def _import_browser_driver_cookies_into_session(
             except Exception:
                 continue
     return imported
+
+
+def _sync_browser_driver_user_agent_to_session(
+    session: requests.Session,
+    *,
+    driver: Any,
+) -> str:
+    try:
+        user_agent = str(
+            driver.execute_script("return navigator.userAgent || '';") or ""
+        ).strip()
+    except Exception:
+        return ""
+    session_headers = getattr(session, "headers", None)
+    if not user_agent or not callable(getattr(session_headers, "update", None)):
+        return ""
+    session_headers.update({"user-agent": user_agent})
+    return user_agent
 
 
 def _browser_bootstrap_chatgpt_web_oauth_session_on_driver(
@@ -2389,21 +2423,71 @@ def _hydrate_browser_driver_with_protocol_session_cookies(
             if dedupe in seen:
                 continue
             seen.add(dedupe)
+            normalized_name = name.lower()
+            is_host_prefixed = normalized_name.startswith("__host-")
+            is_secure_prefixed = normalized_name.startswith("__secure-")
+            domain_specified = bool(getattr(cookie, "domain_specified", domain.startswith(".")))
+            if is_host_prefixed:
+                path = "/"
             payload = {
                 "name": name,
                 "value": value,
                 "path": path,
-                "secure": bool(getattr(cookie, "secure", False)),
+                "secure": bool(
+                    getattr(cookie, "secure", False)
+                    or is_host_prefixed
+                    or is_secure_prefixed
+                ),
             }
+            cdp_payload = dict(payload)
+            if domain_specified and not is_host_prefixed:
+                cdp_payload["domain"] = domain
+            else:
+                cdp_payload["url"] = target_url
+            cookie_rest = getattr(cookie, "_rest", None)
+            if isinstance(cookie_rest, dict):
+                if "HttpOnly" in cookie_rest:
+                    http_only = cookie_rest.get("HttpOnly")
+                    if isinstance(http_only, bool):
+                        normalized_http_only = http_only
+                    elif http_only is None:
+                        normalized_http_only = True
+                    else:
+                        normalized_http_only = str(http_only).strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        }
+                    payload["httpOnly"] = normalized_http_only
+                    cdp_payload["httpOnly"] = normalized_http_only
+                same_site = str(cookie_rest.get("SameSite") or "").strip().lower()
+                if same_site in {"strict", "lax", "none"}:
+                    normalized_same_site = same_site.capitalize()
+                    payload["sameSite"] = normalized_same_site
+                    cdp_payload["sameSite"] = normalized_same_site
+                    if same_site == "none":
+                        payload["secure"] = True
+                        cdp_payload["secure"] = True
             normalized_domain = domain.lstrip(".")
-            if normalized_domain:
+            if normalized_domain and domain_specified and not is_host_prefixed:
                 payload["domain"] = normalized_domain
             try:
                 expiry = getattr(cookie, "expires", None)
                 if expiry:
                     payload["expiry"] = int(expiry)
+                    cdp_payload["expires"] = float(expiry)
             except Exception:
                 pass
+            execute_cdp_cmd = getattr(driver, "execute_cdp_cmd", None)
+            if callable(execute_cdp_cmd):
+                try:
+                    cdp_result = execute_cdp_cmd("Network.setCookie", cdp_payload)
+                    if isinstance(cdp_result, dict) and cdp_result.get("success") is True:
+                        imported += 1
+                        continue
+                except Exception:
+                    pass
             try:
                 driver.add_cookie(payload)
                 imported += 1
@@ -5543,6 +5627,116 @@ def _export_protocol_session_cookies(session: requests.Session) -> list[dict[str
     return exported
 
 
+def _is_openai_session_cookie_domain(domain: str) -> bool:
+    normalized = str(domain or "").strip().lower().lstrip(".")
+    return normalized in {"openai.com", "chatgpt.com"} or normalized.endswith(
+        (".openai.com", ".chatgpt.com")
+    )
+
+
+def _protocol_proxy_fingerprint(explicit_proxy: str | None) -> str:
+    normalized_proxy = normalize_proxy_env_url(explicit_proxy) or ""
+    if not normalized_proxy:
+        return ""
+    return hashlib.sha256(normalized_proxy.encode("utf-8")).hexdigest()
+
+
+def export_authenticated_session_context(
+    *,
+    session: requests.Session,
+    user_agent: str,
+    device_id: str,
+    explicit_proxy: str | None,
+) -> dict[str, Any]:
+    now = int(time.time())
+    session_cookies: list[dict[str, Any]] = []
+    for cookie in _export_protocol_session_cookies(session):
+        if not _is_openai_session_cookie_domain(str(cookie.get("domain") or "")):
+            continue
+        try:
+            expiry = int(cookie.get("expiry") or 0)
+        except (TypeError, ValueError):
+            expiry = 0
+        if expiry and expiry <= now:
+            continue
+        session_cookies.append(cookie)
+    if not session_cookies:
+        raise RuntimeError("authenticated_session_context_has_no_openai_cookies")
+    return {
+        "version": 1,
+        "capturedAt": int(time.time()),
+        "proxyFingerprint": _protocol_proxy_fingerprint(explicit_proxy),
+        "sessionCookies": session_cookies,
+        "browser": {
+            "userAgent": str(user_agent or DEFAULT_PROTOCOL_USER_AGENT).strip() or DEFAULT_PROTOCOL_USER_AGENT,
+            "deviceId": str(device_id or "").strip(),
+        },
+    }
+
+
+def restore_authenticated_session_from_context(
+    authenticated_session: dict[str, Any],
+    *,
+    explicit_proxy: str | None,
+) -> requests.Session:
+    if not isinstance(authenticated_session, dict):
+        raise RuntimeError("authenticated_session_context_invalid_version")
+    try:
+        version = int(authenticated_session.get("version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version != 1:
+        raise RuntimeError("authenticated_session_context_invalid_version")
+    try:
+        captured_at = int(authenticated_session.get("capturedAt") or 0)
+    except (TypeError, ValueError):
+        captured_at = 0
+    try:
+        max_age_seconds = max(
+            1,
+            int(float(os.environ.get("PROTOCOL_AUTHENTICATED_SESSION_MAX_AGE_SECONDS") or 1800)),
+        )
+    except (TypeError, ValueError):
+        max_age_seconds = 1800
+    age_seconds = int(time.time()) - captured_at
+    if captured_at <= 0 or age_seconds < -300 or age_seconds > max_age_seconds:
+        raise RuntimeError("authenticated_session_context_expired")
+    expected_proxy_fingerprint = str(authenticated_session.get("proxyFingerprint") or "").strip()
+    if expected_proxy_fingerprint != _protocol_proxy_fingerprint(explicit_proxy):
+        raise RuntimeError("authenticated_session_proxy_mismatch")
+
+    browser_context = (
+        authenticated_session.get("browser") if isinstance(authenticated_session.get("browser"), dict) else {}
+    )
+    if not str(browser_context.get("userAgent") or "").strip() or not str(
+        browser_context.get("deviceId") or ""
+    ).strip():
+        raise RuntimeError("authenticated_session_context_invalid_browser")
+
+    now = int(time.time())
+    session_cookies: list[dict[str, Any]] = []
+    for cookie in authenticated_session.get("sessionCookies") or []:
+        if not isinstance(cookie, dict):
+            continue
+        if not _is_openai_session_cookie_domain(str(cookie.get("domain") or "")):
+            continue
+        try:
+            expiry = int(cookie.get("expiry") or 0)
+        except (TypeError, ValueError):
+            expiry = 0
+        if expiry and expiry <= now:
+            continue
+        session_cookies.append(dict(cookie))
+    if not session_cookies:
+        raise RuntimeError("authenticated_session_context_has_no_live_openai_cookies")
+    return _restore_protocol_session_from_resume_context(
+        {
+            "sessionCookies": session_cookies,
+            "browser": dict(browser_context),
+        }
+    )
+
+
 def _restore_protocol_session_from_resume_context(resume_context: dict[str, Any]) -> requests.Session:
     impersonate = (os.environ.get("PROTOCOL_HTTP_IMPERSONATE") or "").strip() or _DEFAULT_IMPERSONATE
     verify_tls = env_flag("PROTOCOL_HTTP_VERIFY_TLS", False)
@@ -6226,10 +6420,7 @@ def _response_has_phone_wall(response: Any) -> bool:
 def _raise_if_phone_wall_response(response: Any, *, context: str) -> None:
     if not _response_has_phone_wall(response):
         return
-    page_type = _extract_page_type(response) or "unknown"
-    raise RuntimeError(
-        f"phone_wall context={context} page_type={page_type} body={_response_preview(response, 300)}"
-    )
+    raise _PhoneWallResponseError(response=response, context=context)
 
 
 def _resume_context_browser_user_agent(resume_context: dict[str, Any]) -> str:
@@ -8176,7 +8367,7 @@ def _maybe_finish_codex_oauth_from_response(
     print(
         "[python-protocol-service] inspect oauth completion response "
         f"label={context_label} status={getattr(response, 'status_code', '<unknown>')} "
-        f"url={response_url or '<none>'} location={response_location or '<none>'} "
+        f"url={_format_logged_url(response_url)} location={_format_logged_url(response_location)} "
         f"page_type={page_type}"
     )
 
@@ -8328,6 +8519,1777 @@ def _maybe_finish_codex_oauth_from_response(
     return None
 
 
+def _is_codex_account_picker_response(response: Any) -> bool:
+    response_url = _response_url(response).lower()
+    response_location = _response_location(response).lower()
+    return bool(
+        "choose-an-account" in response_url
+        or "choose-an-account" in response_location
+    )
+
+
+def _is_trusted_codex_browser_entry_url(value: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+    except Exception:
+        return False
+    return bool(
+        str(parsed.scheme or "").lower() == "https"
+        and str(parsed.hostname or "").lower() == "auth.openai.com"
+    )
+
+
+def _codex_account_picker_entry_url(response: Any, *, fallback_url: str) -> str:
+    response_url = _response_url(response)
+    response_location = _response_location(response)
+    resolved_location = (
+        urllib.parse.urljoin(response_url or fallback_url, response_location)
+        if response_location
+        else ""
+    )
+    ordered_candidates = [
+        candidate
+        for candidate in (resolved_location, response_url, fallback_url)
+        if "choose-an-account" in str(candidate or "").lower()
+    ]
+    for candidate in ordered_candidates:
+        normalized = str(candidate or "").strip()
+        if normalized and _is_trusted_codex_browser_entry_url(normalized):
+            return normalized
+    return ""
+
+
+def _browser_codex_account_picker_action_key(driver: Any) -> str:
+    try:
+        current_url = str(getattr(driver, "current_url", "") or "").strip()
+    except Exception:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(current_url)
+    except (TypeError, ValueError):
+        return ""
+    normalized_path = str(parsed.path or "").strip().lower()
+    if "choose-an-account" not in normalized_path:
+        return ""
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return ""
+    return f"{host}{normalized_path}"
+
+
+def _browser_try_submit_codex_workspace_selection(
+    driver: Any,
+    *,
+    preferred_workspace_id: str,
+) -> tuple[str, str]:
+    workspace_id = str(preferred_workspace_id or "").strip()
+    if not workspace_id or not _browser_codex_account_picker_action_key(driver):
+        return "", "not_applicable"
+    current_url = str(getattr(driver, "current_url", "") or "").strip()
+    if not _is_trusted_codex_browser_entry_url(current_url):
+        return "", "untrusted_page"
+    if bool(getattr(driver, "_protocol_codex_workspace_selection_attempted", False)):
+        return "", "already_attempted"
+    setattr(driver, "_protocol_codex_workspace_selection_attempted", True)
+    try:
+        result = driver.execute_async_script(
+            """
+            const workspaceId = String(arguments[0] || '').trim();
+            const done = arguments[arguments.length - 1];
+            let settled = false;
+            let timeoutId = 0;
+            let abortId = 0;
+            const controller = new AbortController();
+            const finish = (payload) => {
+              if (settled) return;
+              settled = true;
+              if (timeoutId) clearTimeout(timeoutId);
+              if (abortId) clearTimeout(abortId);
+              done(payload);
+            };
+            timeoutId = setTimeout(() => finish({ok: false, status: 0}), 15000);
+            abortId = setTimeout(() => controller.abort(), 12000);
+            (async () => {
+              try {
+                const endpoint = new URL('/api/accounts/workspace/select', location.href);
+                if (endpoint.origin !== location.origin || location.hostname !== 'auth.openai.com') {
+                  finish({ok: false, status: 0});
+                  return;
+                }
+                const response = await fetch(endpoint.href, {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: {
+                    'accept': 'application/json',
+                    'content-type': 'application/json',
+                  },
+                  body: JSON.stringify({workspace_id: workspaceId}),
+                  signal: controller.signal,
+                });
+                let payload = {};
+                try {
+                  payload = await response.json();
+                } catch (_) {}
+                finish({
+                  ok: response.ok,
+                  status: Number(response.status) || 0,
+                  continueUrl: typeof payload.continue_url === 'string' ? payload.continue_url : '',
+                });
+              } catch (_) {
+                finish({ok: false, status: 0});
+              }
+            })();
+            """,
+            workspace_id,
+        )
+    except Exception:
+        return "", "script_failed"
+    if not isinstance(result, dict):
+        return "", "invalid_result"
+    try:
+        status_code = int(result.get("status") or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if not bool(result.get("ok")):
+        if 400 <= status_code < 500:
+            return "", "http_4xx"
+        if 500 <= status_code < 600:
+            return "", "http_5xx"
+        return "", "request_failed"
+    continue_url = str(result.get("continueUrl") or "").strip()
+    if not continue_url:
+        return "", "missing_continue_url"
+    if not _is_trusted_codex_browser_entry_url(continue_url):
+        return "", "untrusted_continue_url"
+    return continue_url, "success"
+
+
+def _is_codex_auth_root_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "auth.openai.com"
+        and (parsed.path or "/") == "/"
+    )
+
+
+def _codex_browser_handoff_error_code(error: Exception) -> str:
+    detail = str(error).strip()
+    candidate = detail.split(None, 1)[0].strip().lower() if detail else ""
+    if re.fullmatch(r"[a-z0-9_]{1,80}", candidate):
+        return candidate
+    return type(error).__name__
+
+
+def _browser_try_click_codex_oauth_action(
+    driver: Any,
+    *,
+    default_email: str,
+    preferred_workspace_id: str,
+) -> str:
+    account_picker_action_key = _browser_codex_account_picker_action_key(driver)
+    prior_account_picker_action_key = str(
+        getattr(driver, "_protocol_last_codex_account_picker_action_key", "") or ""
+    ).strip()
+    if account_picker_action_key and account_picker_action_key == prior_account_picker_action_key:
+        return ""
+    if not account_picker_action_key and prior_account_picker_action_key:
+        setattr(driver, "_protocol_last_codex_account_picker_action_key", "")
+    try:
+        result = driver.execute_script(
+            """
+            const email = String(arguments[0] || '').trim().toLowerCase();
+            const preferredWorkspaceId = String(arguments[1] || '').trim().toLowerCase();
+            const href = String(location.href || '').toLowerCase();
+            const isPicker = href.includes('choose-an-account');
+            const isConsent = href.includes('sign-in-with-chatgpt/codex/consent');
+            if (!isPicker && !isConsent) return { clicked: false, kind: '' };
+
+            const visible = (element) => {
+              try {
+                const rect = element.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0 || element.disabled) return false;
+                for (let current = element; current && current.nodeType === 1; current = current.parentElement) {
+                  const style = window.getComputedStyle(current);
+                  if (current.hidden || current.getAttribute('aria-hidden') === 'true' ||
+                      style.visibility === 'hidden' || style.visibility === 'collapse' ||
+                      style.display === 'none' || Number(style.opacity || '1') <= 0.01 ||
+                      style.pointerEvents === 'none') {
+                    return false;
+                  }
+                }
+                return true;
+              } catch (_error) {
+                return false;
+              }
+            };
+            const interactiveSelector = [
+              'button', 'a', '[role="button"]', '[role="option"]', '[role="listitem"]',
+              '[tabindex]', 'input[type="submit"]', 'input[type="button"]', 'label', 'li',
+              '[data-account-id]', '[data-workspace-id]'
+            ].join(', ');
+            const accountBoundarySelector = [
+              '[role="option"]', '[role="listitem"]', '[data-account-id]', '[data-workspace-id]'
+            ].join(', ');
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const accountActionLabel = (element) => normalize([
+              element.innerText || element.textContent || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('title') || '',
+              element.getAttribute('value') || '',
+            ].join(' '));
+            const rejectedAccountAction = (value) => /use another(?: account)?|choose another(?: account)?|switch account|add account|sign out|log out|cancel|(?:^|\\s)back(?:\\s|$)|log in|sign in|create account|register|continue with(?:\\s|$)/.test(
+              normalize(value)
+            );
+            const ownDescriptor = (element) => normalize([
+              Array.from(element.childNodes || [])
+                .filter((node) => node.nodeType === 3)
+                .map((node) => node.nodeValue || '')
+                .join(' '),
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('title') || '',
+              element.getAttribute('value') || '',
+              element.getAttribute('data-account-id') || '',
+              element.getAttribute('data-workspace-id') || '',
+              element.getAttribute('data-testid') || '',
+              element.getAttribute('id') || '',
+              element.getAttribute('class') || '',
+            ].join(' '));
+            const fullDescriptor = (element) => normalize([
+              element.innerText || element.textContent || '',
+              ownDescriptor(element),
+            ].join(' '));
+            const closestTarget = (element) => {
+              try {
+                return element.matches(interactiveSelector)
+                  ? element
+                  : (element.closest(interactiveSelector) || element);
+              } catch (_error) {
+                return element;
+              }
+            };
+            const targetContainsMultipleIdentities = (target) => {
+              const accountIds = new Set();
+              const workspaceIds = new Set();
+              const emails = new Set();
+              const nodes = [target].concat(Array.from(target.querySelectorAll(
+                '[data-account-id], [data-workspace-id]'
+              )));
+              for (const node of nodes) {
+                const accountId = normalize(node.getAttribute('data-account-id'));
+                const workspaceId = normalize(node.getAttribute('data-workspace-id'));
+                if (accountId) accountIds.add(accountId);
+                if (workspaceId) workspaceIds.add(workspaceId);
+              }
+              const text = normalize(target.innerText || target.textContent || '');
+              for (const match of text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}/g) || []) {
+                emails.add(match);
+              }
+              const boundaries = [target]
+                .concat(Array.from(target.querySelectorAll(accountBoundarySelector)))
+                .filter((node) => {
+                  try {
+                    return node.matches(accountBoundarySelector);
+                  } catch (_error) {
+                    return false;
+                  }
+                });
+              const leafBoundaryCount = boundaries.filter((node) =>
+                !boundaries.some((other) => other !== node && node.contains(other))
+              ).length;
+              return accountIds.size > 1 || workspaceIds.size > 1 || emails.size > 1 ||
+                leafBoundaryCount > 1;
+            };
+            const targetContainsForeignIdentity = (target) => {
+              const text = normalize(target.innerText || target.textContent || '');
+              const targetEmails = new Set(
+                text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}/g) || []
+              );
+              if (targetEmails.size && (!email || !targetEmails.has(email))) return true;
+              const targetIds = new Set();
+              for (const node of [target].concat(Array.from(target.querySelectorAll(
+                '[data-account-id], [data-workspace-id]'
+              )))) {
+                const accountId = normalize(node.getAttribute('data-account-id'));
+                const workspaceId = normalize(node.getAttribute('data-workspace-id'));
+                if (accountId) targetIds.add(accountId);
+                if (workspaceId) targetIds.add(workspaceId);
+              }
+              return !!preferredWorkspaceId && targetIds.size > 0 && !targetIds.has(preferredWorkspaceId);
+            };
+            const geometry = (element) => {
+              let area = Number.MAX_SAFE_INTEGER;
+              try {
+                const rect = element.getBoundingClientRect();
+                area = Math.max(1, rect.width * rect.height);
+              } catch (_error) {}
+              let depth = 0;
+              for (let current = element; current; current = current.parentElement) depth += 1;
+              return { area, depth };
+            };
+            const selectedTarget = (target, kind, mode) => {
+              let ariaDisabled = normalize(target && target.getAttribute('aria-disabled'));
+              if (!['true', 'false'].includes(ariaDisabled)) {
+                ariaDisabled = ariaDisabled ? 'other' : 'absent';
+              }
+              let buttonType = normalize(target && (target.getAttribute('type') || target.type));
+              if (!['submit', 'button', 'reset'].includes(buttonType)) buttonType = 'other';
+              const form = target && (target.form || target.closest('form'));
+              const reactPropsKey = target && Object.keys(target).find((key) =>
+                key.startsWith('__reactProps$') || key.startsWith('__reactEventHandlers$')
+              );
+              const reactProps = reactPropsKey ? target[reactPropsKey] : null;
+              const hasReactOnClick = !!(reactProps && typeof reactProps.onClick === 'function');
+              try {
+                const priorProbe = window.__easyProtocolCodexActionProbe;
+                if (priorProbe && typeof priorProbe.cleanup === 'function') priorProbe.cleanup();
+                const probe = {
+                  target,
+                  captureCount: 0,
+                  trustedCaptureCount: 0,
+                  bubbleCount: 0,
+                  defaultPrevented: false,
+                  mutationCount: 0,
+                  formSubmitCount: 0,
+                  windowErrorCount: 0,
+                  unhandledRejectionCount: 0,
+                  resourceErrorCount: 0,
+                  fetchCallCount: 0,
+                  xhrSendCount: 0,
+                  actionAuthAccountsCallCount: 0,
+                  actionOauthCallCount: 0,
+                  actionCodexCallCount: 0,
+                  actionApiCallCount: 0,
+                  actionBackendApiCallCount: 0,
+                  actionCdnCallCount: 0,
+                  actionPickerCallCount: 0,
+                  actionStaticCallCount: 0,
+                  actionOtherAuthCallCount: 0,
+                  actionExternalCallCount: 0,
+                  actionOpenAiCallCount: 0,
+                  actionChatgptCallCount: 0,
+                  actionNonHttpCallCount: 0,
+                  actionThirdPartyCallCount: 0,
+                  fetchResolvedCount: 0,
+                  fetchRejectedCount: 0,
+                  fetch4xxCount: 0,
+                  fetch5xxCount: 0,
+                  startedAt: Number(performance && performance.now ? performance.now() : 0),
+                };
+                try {
+                  probe.resourceBaseline = performance.getEntriesByType('resource').length;
+                } catch (_error) {
+                  probe.resourceBaseline = 0;
+                }
+                const recordActionCall = (rawUrl) => {
+                  try {
+                    const value = typeof rawUrl === 'string'
+                      ? rawUrl
+                      : String(rawUrl && rawUrl.url || '');
+                    const actionUrl = new URL(value, location.href);
+                    const actionProtocol = actionUrl.protocol.toLowerCase();
+                    const actionHost = actionUrl.hostname.toLowerCase();
+                    const actionPath = actionUrl.pathname.toLowerCase();
+                    if (actionProtocol !== 'http:' && actionProtocol !== 'https:') {
+                      probe.actionExternalCallCount += 1;
+                      probe.actionNonHttpCallCount += 1;
+                    } else if (actionHost !== 'auth.openai.com') {
+                      probe.actionExternalCallCount += 1;
+                      if (actionHost === 'openai.com' || actionHost.endsWith('.openai.com')) {
+                        probe.actionOpenAiCallCount += 1;
+                      } else if (actionHost === 'chatgpt.com' || actionHost.endsWith('.chatgpt.com')) {
+                        probe.actionChatgptCallCount += 1;
+                      } else {
+                        probe.actionThirdPartyCallCount += 1;
+                      }
+                    } else if (actionPath.startsWith('/api/accounts/')) {
+                      probe.actionAuthAccountsCallCount += 1;
+                    } else if (actionPath.startsWith('/oauth/')) {
+                      probe.actionOauthCallCount += 1;
+                    } else if (actionPath.startsWith('/sign-in-with-chatgpt/')) {
+                      probe.actionCodexCallCount += 1;
+                    } else if (actionPath.startsWith('/api/')) {
+                      probe.actionApiCallCount += 1;
+                    } else if (actionPath.startsWith('/backend-api/')) {
+                      probe.actionBackendApiCallCount += 1;
+                    } else if (actionPath.startsWith('/cdn-cgi/')) {
+                      probe.actionCdnCallCount += 1;
+                    } else if (actionPath.startsWith('/choose-an-account')) {
+                      probe.actionPickerCallCount += 1;
+                    } else if (actionPath.startsWith('/_next/static/') ||
+                               /\\.(?:js|css|png|jpe?g|gif|svg|webp|woff2?)$/.test(actionPath)) {
+                      probe.actionStaticCallCount += 1;
+                    } else {
+                      probe.actionOtherAuthCallCount += 1;
+                    }
+                  } catch (_error) {
+                    probe.actionExternalCallCount += 1;
+                  }
+                };
+                const originalFetch = typeof window.fetch === 'function' ? window.fetch : null;
+                const wrappedFetch = originalFetch ? function() {
+                  probe.fetchCallCount += 1;
+                  recordActionCall(arguments[0]);
+                  const responsePromise = originalFetch.apply(this, arguments);
+                  if (responsePromise && typeof responsePromise.then === 'function') {
+                    responsePromise.then(
+                      (response) => {
+                        probe.fetchResolvedCount += 1;
+                        const status = Number(response && response.status || 0);
+                        if (status >= 400 && status < 500) probe.fetch4xxCount += 1;
+                        else if (status >= 500 && status < 600) probe.fetch5xxCount += 1;
+                      },
+                      () => { probe.fetchRejectedCount += 1; },
+                    );
+                  }
+                  return responsePromise;
+                } : null;
+                if (wrappedFetch) window.fetch = wrappedFetch;
+                const xhrPrototype = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+                const originalXhrOpen = xhrPrototype && xhrPrototype.open;
+                const originalXhrSend = xhrPrototype && xhrPrototype.send;
+                const xhrUrls = new WeakMap();
+                const wrappedXhrOpen = originalXhrOpen ? function() {
+                  try { xhrUrls.set(this, arguments[1]); } catch (_error) {}
+                  return originalXhrOpen.apply(this, arguments);
+                } : null;
+                const wrappedXhrSend = originalXhrSend ? function() {
+                  probe.xhrSendCount += 1;
+                  try { recordActionCall(xhrUrls.get(this)); } catch (_error) {
+                    probe.actionExternalCallCount += 1;
+                  }
+                  return originalXhrSend.apply(this, arguments);
+                } : null;
+                if (xhrPrototype && wrappedXhrOpen && wrappedXhrSend) {
+                  xhrPrototype.open = wrappedXhrOpen;
+                  xhrPrototype.send = wrappedXhrSend;
+                }
+                const matchesTarget = (event) => !!(
+                  event && event.target &&
+                  (event.target === target || (target && target.contains(event.target)))
+                );
+                const capture = (event) => {
+                  if (!matchesTarget(event)) return;
+                  probe.captureCount += 1;
+                  if (event.isTrusted) probe.trustedCaptureCount += 1;
+                };
+                const bubble = (event) => {
+                  if (!matchesTarget(event)) return;
+                  probe.bubbleCount += 1;
+                  probe.defaultPrevented = probe.defaultPrevented || !!event.defaultPrevented;
+                };
+                const formSubmit = (event) => {
+                  if (form && event && event.target === form) probe.formSubmitCount += 1;
+                };
+                const windowError = (event) => {
+                  if (event && event.message) probe.windowErrorCount += 1;
+                };
+                const unhandledRejection = () => {
+                  probe.unhandledRejectionCount += 1;
+                };
+                const resourceError = (event) => {
+                  if (event && event.target && event.target !== window) probe.resourceErrorCount += 1;
+                };
+                document.addEventListener('click', capture, true);
+                document.addEventListener('click', bubble, false);
+                document.addEventListener('submit', formSubmit, true);
+                window.addEventListener('error', windowError, true);
+                window.addEventListener('unhandledrejection', unhandledRejection, true);
+                document.addEventListener('error', resourceError, true);
+                const observer = new MutationObserver((records) => {
+                  probe.mutationCount += Math.max(1, Number(records && records.length || 0));
+                });
+                if (document.documentElement) {
+                  observer.observe(document.documentElement, {
+                    attributes: true,
+                    childList: true,
+                    subtree: true,
+                  });
+                }
+                probe.cleanup = () => {
+                  if (wrappedFetch && window.fetch === wrappedFetch) window.fetch = originalFetch;
+                  if (xhrPrototype && xhrPrototype.open === wrappedXhrOpen) {
+                    xhrPrototype.open = originalXhrOpen;
+                  }
+                  if (xhrPrototype && xhrPrototype.send === wrappedXhrSend) {
+                    xhrPrototype.send = originalXhrSend;
+                  }
+                  document.removeEventListener('click', capture, true);
+                  document.removeEventListener('click', bubble, false);
+                  document.removeEventListener('submit', formSubmit, true);
+                  window.removeEventListener('error', windowError, true);
+                  window.removeEventListener('unhandledrejection', unhandledRejection, true);
+                  document.removeEventListener('error', resourceError, true);
+                  observer.disconnect();
+                };
+                window.__easyProtocolCodexActionProbe = probe;
+              } catch (_error) {}
+              return {
+                target,
+                kind,
+                mode,
+                tag: normalize(target && target.tagName),
+                isButton: !!(target && target.matches(
+                  'button, [role="button"], input[type="submit"], input[type="button"]'
+                )),
+                disabled: !!(target && target.disabled),
+                ariaDisabled,
+                buttonType,
+                hasForm: !!form,
+                hasOnClick: !!(target && (
+                  typeof target.onclick === 'function' || target.hasAttribute('onclick')
+                )),
+                hasReactOnClick,
+              };
+            };
+            if (isPicker) {
+              const accountButtonTargets = new Set();
+              for (const element of Array.from(document.querySelectorAll('button, [role="button"]'))) {
+                if (!visible(element) || targetContainsMultipleIdentities(element) ||
+                    targetContainsForeignIdentity(element)) continue;
+                const label = accountActionLabel(element);
+                if (!label || rejectedAccountAction(label)) continue;
+                accountButtonTargets.add(element);
+              }
+              const identityCandidates = new Map();
+              const addIdentityCandidate = (element, descriptor) => {
+                const accountId = normalize(element.getAttribute('data-account-id'));
+                const workspaceId = normalize(element.getAttribute('data-workspace-id'));
+                const descriptorTokens = descriptor.split(/[^a-z0-9_-]+/).filter(Boolean);
+                const emailTokens = descriptor.match(
+                  /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}/g
+                ) || [];
+                const workspaceMatch = !!preferredWorkspaceId && (
+                  accountId === preferredWorkspaceId || workspaceId === preferredWorkspaceId ||
+                  descriptorTokens.includes(preferredWorkspaceId)
+                );
+                const emailMatch = !!email && emailTokens.includes(email);
+                if (!workspaceMatch && !emailMatch) return;
+                const target = closestTarget(element);
+                if (!visible(target) || targetContainsMultipleIdentities(target)) return;
+                const targetText = fullDescriptor(target);
+                if (rejectedAccountAction(targetText)) return;
+                const rank = (workspaceMatch ? 2 : 0) + (emailMatch ? 1 : 0);
+                const prior = identityCandidates.get(target);
+                if (!prior || rank > prior.rank) {
+                  identityCandidates.set(target, { element: target, rank, ...geometry(target) });
+                }
+              };
+              if (email || preferredWorkspaceId) {
+                for (const element of Array.from(document.querySelectorAll('body *'))) {
+                  addIdentityCandidate(element, ownDescriptor(element));
+                }
+                for (const boundary of Array.from(document.querySelectorAll(accountBoundarySelector))) {
+                  if (targetContainsMultipleIdentities(boundary)) continue;
+                  addIdentityCandidate(boundary, fullDescriptor(boundary));
+                }
+              }
+              const ranked = Array.from(identityCandidates.values()).sort((left, right) =>
+                (right.rank - left.rank) || (left.area - right.area) || (right.depth - left.depth)
+              );
+              if (ranked.length) {
+                if (ranked.length > 1 && ranked[0].rank === ranked[1].rank) {
+                  const topRank = ranked[0].rank;
+                  const topIdentityTargets = new Set(
+                    ranked.filter((candidate) => candidate.rank === topRank)
+                      .map((candidate) => candidate.element)
+                  );
+                  const tiedAccountButtonTargets = new Set(
+                    Array.from(accountButtonTargets).filter((element) =>
+                      topIdentityTargets.has(element)
+                    )
+                  );
+                  if (tiedAccountButtonTargets.size === 1) {
+                    const target = Array.from(tiedAccountButtonTargets)[0];
+                    return selectedTarget(target, 'account', 'identity_tied_button');
+                  }
+                  return { clicked: false, kind: 'ambiguous-account' };
+                }
+                return selectedTarget(ranked[0].element, 'account', 'identity_ranked');
+              }
+              const genericTargets = new Set();
+              const semanticElements = Array.from(document.querySelectorAll(accountBoundarySelector));
+              for (const element of semanticElements) {
+                const target = closestTarget(element);
+                if (!visible(target) || targetContainsMultipleIdentities(target) ||
+                    targetContainsForeignIdentity(target)) continue;
+                const targetText = fullDescriptor(target);
+                if (rejectedAccountAction(targetText)) continue;
+                genericTargets.add(target);
+              }
+              if (genericTargets.size > 1) {
+                return { clicked: false, kind: 'ambiguous-account' };
+              }
+              if (genericTargets.size === 1) {
+                const target = Array.from(genericTargets)[0];
+                return selectedTarget(target, 'account', 'generic_single');
+              }
+
+              if (accountButtonTargets.size !== 1) {
+                return {
+                  clicked: false,
+                  kind: accountButtonTargets.size > 1 ? 'ambiguous-account' : '',
+                };
+              }
+              const target = Array.from(accountButtonTargets)[0];
+              return selectedTarget(target, 'account', 'button_single');
+            }
+
+            const consentCandidates = new Set();
+            for (const element of Array.from(document.querySelectorAll(interactiveSelector))) {
+              if (!visible(element)) continue;
+              const label = normalize([
+                element.innerText || element.textContent || '',
+                element.getAttribute('aria-label') || '',
+                element.getAttribute('title') || '',
+                element.getAttribute('value') || '',
+              ].join(' '));
+              if (!/^(continue|continue to codex|agree|accept|allow|authorize)$/.test(label)) continue;
+              const form = element.form || element.closest('form');
+              const context = form || element.closest('[role="dialog"], main');
+              if (!context) continue;
+              const contextText = normalize(context.innerText || context.textContent || '');
+              if (!/codex|authorize|authorization|permission|sign in/.test(contextText)) continue;
+              if (form) {
+                const rawAction = normalize(form.getAttribute('action'));
+                if (rawAction) {
+                  try {
+                    const actionUrl = new URL(rawAction, location.href);
+                    const samePage = actionUrl.href.split('#')[0] === String(location.href).split('#')[0];
+                    const authAction = /consent|oauth|authorize/.test(actionUrl.pathname.toLowerCase());
+                    if (actionUrl.origin !== location.origin || (!samePage && !authAction)) continue;
+                  } catch (_error) {
+                    continue;
+                  }
+                }
+              }
+              consentCandidates.add(element);
+            }
+            if (consentCandidates.size !== 1) {
+              return {
+                clicked: false,
+                kind: consentCandidates.size > 1 ? 'ambiguous-consent' : '',
+              };
+            }
+            const consentTarget = Array.from(consentCandidates)[0];
+            return selectedTarget(consentTarget, 'consent', 'consent_single');
+            """,
+            str(default_email or "").strip(),
+            str(preferred_workspace_id or "").strip(),
+        ) or {}
+    except Exception as exc:
+        raise RuntimeError("codex_browser_action_script_failed") from exc
+    if not isinstance(result, dict):
+        return ""
+    kind = str(result.get("kind") or "").strip()
+    target = result.get("target")
+    if kind not in {"account", "consent"} or target is None:
+        return ""
+    try:
+        target.click()
+    except Exception:
+        try:
+            driver.execute_script(
+                """
+                const probe = window.__easyProtocolCodexActionProbe;
+                if (probe && typeof probe.cleanup === 'function') probe.cleanup();
+                window.__easyProtocolCodexActionProbe = null;
+                """
+            )
+        except Exception:
+            pass
+        return ""
+    if kind == "account" and account_picker_action_key:
+        setattr(
+            driver,
+            "_protocol_last_codex_account_picker_action_key",
+            account_picker_action_key,
+        )
+    safe_mode = str(result.get("mode") or "").strip().lower()
+    if safe_mode not in {
+        "identity_tied_button",
+        "identity_ranked",
+        "generic_single",
+        "button_single",
+        "consent_single",
+    }:
+        safe_mode = "unknown"
+    safe_tag = str(result.get("tag") or "").strip().lower()
+    if safe_tag not in {"button", "a", "div", "li", "label", "input", "span"}:
+        safe_tag = "other"
+    setattr(
+        driver,
+        "_protocol_last_codex_action_metadata",
+        {
+            "mode": safe_mode,
+            "tag": safe_tag,
+            "isButton": bool(result.get("isButton")),
+            "disabled": bool(result.get("disabled")),
+            "ariaDisabled": (
+                str(result.get("ariaDisabled") or "").strip().lower()
+                if str(result.get("ariaDisabled") or "").strip().lower()
+                in {"true", "false", "absent", "other"}
+                else "other"
+            ),
+            "buttonType": (
+                str(result.get("buttonType") or "").strip().lower()
+                if str(result.get("buttonType") or "").strip().lower()
+                in {"submit", "button", "reset", "other"}
+                else "other"
+            ),
+            "hasForm": bool(result.get("hasForm")),
+            "hasOnClick": bool(result.get("hasOnClick")),
+            "hasReactOnClick": bool(result.get("hasReactOnClick")),
+        },
+    )
+    return kind
+
+
+def _browser_codex_action_probe(driver: Any) -> dict[str, int | bool]:
+    try:
+        raw = driver.execute_script(
+            """
+            const probe = window.__easyProtocolCodexActionProbe;
+            if (!probe) return { available: false };
+            let resources = [];
+            try {
+              resources = performance.getEntriesByType('resource').slice(
+                Math.max(0, Number(probe.resourceBaseline || 0))
+              );
+            } catch (_error) {}
+            const resourceCounts = {
+              resourceCount: resources.length,
+              resourceFetchCount: 0,
+              resourceXhrCount: 0,
+              resourceStatusUnknownCount: 0,
+              resource2xxCount: 0,
+              resource3xxCount: 0,
+              resource4xxCount: 0,
+              resource5xxCount: 0,
+              resource400Count: 0,
+              resource401Count: 0,
+              resource403Count: 0,
+              resource404Count: 0,
+              resource409Count: 0,
+              resource429Count: 0,
+              resourceOther4xxCount: 0,
+              resourceAuthAccounts4xxCount: 0,
+              resourceOauth4xxCount: 0,
+              resourceCodex4xxCount: 0,
+              resourceAuthOther4xxCount: 0,
+              resourceExternal4xxCount: 0,
+              resource403FetchCount: 0,
+              resource403XhrCount: 0,
+              resource403ApiCount: 0,
+              resource403BackendApiCount: 0,
+              resource403CdnCount: 0,
+              resource403PickerCount: 0,
+              resource403StaticCount: 0,
+              resource403OtherAuthCount: 0,
+              resourceActionAuthAccountsCount: 0,
+              resourceActionOauthCount: 0,
+              resourceActionCodexCount: 0,
+              resourceActionApiCount: 0,
+              resourceActionBackendApiCount: 0,
+              resourceActionCdnCount: 0,
+              resourceActionPickerCount: 0,
+              resourceActionStaticCount: 0,
+              resourceActionOtherAuthCount: 0,
+              resourceActionExternalCount: 0,
+            };
+            for (const entry of resources) {
+              const initiatorType = String(entry && entry.initiatorType || '').toLowerCase();
+              if (initiatorType === 'fetch') resourceCounts.resourceFetchCount += 1;
+              if (initiatorType === 'xmlhttprequest') resourceCounts.resourceXhrCount += 1;
+              if (initiatorType === 'fetch' || initiatorType === 'xmlhttprequest') {
+                try {
+                  const actionUrl = new URL(String(entry && entry.name || ''), location.href);
+                  const actionHost = actionUrl.hostname.toLowerCase();
+                  const actionPath = actionUrl.pathname.toLowerCase();
+                  if (actionHost === 'auth.openai.com') {
+                    if (actionPath.startsWith('/api/accounts/')) {
+                      resourceCounts.resourceActionAuthAccountsCount += 1;
+                    } else if (actionPath.startsWith('/oauth/')) {
+                      resourceCounts.resourceActionOauthCount += 1;
+                    } else if (actionPath.startsWith('/sign-in-with-chatgpt/')) {
+                      resourceCounts.resourceActionCodexCount += 1;
+                    } else if (actionPath.startsWith('/api/')) {
+                      resourceCounts.resourceActionApiCount += 1;
+                    } else if (actionPath.startsWith('/backend-api/')) {
+                      resourceCounts.resourceActionBackendApiCount += 1;
+                    } else if (actionPath.startsWith('/cdn-cgi/')) {
+                      resourceCounts.resourceActionCdnCount += 1;
+                    } else if (actionPath.startsWith('/choose-an-account')) {
+                      resourceCounts.resourceActionPickerCount += 1;
+                    } else if (actionPath.startsWith('/_next/static/') ||
+                               /\\.(?:js|css|png|jpe?g|gif|svg|webp|woff2?)$/.test(actionPath)) {
+                      resourceCounts.resourceActionStaticCount += 1;
+                    } else {
+                      resourceCounts.resourceActionOtherAuthCount += 1;
+                    }
+                  } else {
+                    resourceCounts.resourceActionExternalCount += 1;
+                  }
+                } catch (_error) {
+                  resourceCounts.resourceActionExternalCount += 1;
+                }
+              }
+              const status = Number(entry && entry.responseStatus || 0);
+              if (status >= 200 && status < 300) resourceCounts.resource2xxCount += 1;
+              else if (status >= 300 && status < 400) resourceCounts.resource3xxCount += 1;
+              else if (status >= 400 && status < 500) {
+                resourceCounts.resource4xxCount += 1;
+                if (status === 400) resourceCounts.resource400Count += 1;
+                else if (status === 401) resourceCounts.resource401Count += 1;
+                else if (status === 403) resourceCounts.resource403Count += 1;
+                else if (status === 404) resourceCounts.resource404Count += 1;
+                else if (status === 409) resourceCounts.resource409Count += 1;
+                else if (status === 429) resourceCounts.resource429Count += 1;
+                else resourceCounts.resourceOther4xxCount += 1;
+                if (status === 403) {
+                  if (initiatorType === 'fetch') resourceCounts.resource403FetchCount += 1;
+                  if (initiatorType === 'xmlhttprequest') resourceCounts.resource403XhrCount += 1;
+                }
+                try {
+                  const resourceUrl = new URL(String(entry && entry.name || ''), location.href);
+                  const host = resourceUrl.hostname.toLowerCase();
+                  const path = resourceUrl.pathname.toLowerCase();
+                  if (host === 'auth.openai.com') {
+                    if (status === 403) {
+                      if (path.startsWith('/api/')) {
+                        resourceCounts.resource403ApiCount += 1;
+                      } else if (path.startsWith('/backend-api/')) {
+                        resourceCounts.resource403BackendApiCount += 1;
+                      } else if (path.startsWith('/cdn-cgi/')) {
+                        resourceCounts.resource403CdnCount += 1;
+                      } else if (path.startsWith('/choose-an-account')) {
+                        resourceCounts.resource403PickerCount += 1;
+                      } else if (path.startsWith('/_next/static/') ||
+                                 /\\.(?:js|css|png|jpe?g|gif|svg|webp|woff2?)$/.test(path)) {
+                        resourceCounts.resource403StaticCount += 1;
+                      } else {
+                        resourceCounts.resource403OtherAuthCount += 1;
+                      }
+                    }
+                    if (path.startsWith('/api/accounts/')) {
+                      resourceCounts.resourceAuthAccounts4xxCount += 1;
+                    } else if (path.startsWith('/oauth/')) {
+                      resourceCounts.resourceOauth4xxCount += 1;
+                    } else if (path.startsWith('/sign-in-with-chatgpt/')) {
+                      resourceCounts.resourceCodex4xxCount += 1;
+                    } else {
+                      resourceCounts.resourceAuthOther4xxCount += 1;
+                    }
+                  } else {
+                    resourceCounts.resourceExternal4xxCount += 1;
+                  }
+                } catch (_error) {
+                  resourceCounts.resourceExternal4xxCount += 1;
+                }
+              }
+              else if (status >= 500 && status < 600) resourceCounts.resource5xxCount += 1;
+              else resourceCounts.resourceStatusUnknownCount += 1;
+            }
+            const result = {
+              available: true,
+              targetConnected: !!(probe.target && probe.target.isConnected),
+              captureCount: Number(probe.captureCount || 0),
+              trustedCaptureCount: Number(probe.trustedCaptureCount || 0),
+              bubbleCount: Number(probe.bubbleCount || 0),
+              defaultPrevented: !!probe.defaultPrevented,
+              mutationCount: Number(probe.mutationCount || 0),
+              formSubmitCount: Number(probe.formSubmitCount || 0),
+              windowErrorCount: Number(probe.windowErrorCount || 0),
+              unhandledRejectionCount: Number(probe.unhandledRejectionCount || 0),
+              resourceErrorCount: Number(probe.resourceErrorCount || 0),
+              fetchCallCount: Number(probe.fetchCallCount || 0),
+              xhrSendCount: Number(probe.xhrSendCount || 0),
+              actionAuthAccountsCallCount: Number(probe.actionAuthAccountsCallCount || 0),
+              actionOauthCallCount: Number(probe.actionOauthCallCount || 0),
+              actionCodexCallCount: Number(probe.actionCodexCallCount || 0),
+              actionApiCallCount: Number(probe.actionApiCallCount || 0),
+              actionBackendApiCallCount: Number(probe.actionBackendApiCallCount || 0),
+              actionCdnCallCount: Number(probe.actionCdnCallCount || 0),
+              actionPickerCallCount: Number(probe.actionPickerCallCount || 0),
+              actionStaticCallCount: Number(probe.actionStaticCallCount || 0),
+              actionOtherAuthCallCount: Number(probe.actionOtherAuthCallCount || 0),
+              actionExternalCallCount: Number(probe.actionExternalCallCount || 0),
+              actionOpenAiCallCount: Number(probe.actionOpenAiCallCount || 0),
+              actionChatgptCallCount: Number(probe.actionChatgptCallCount || 0),
+              actionNonHttpCallCount: Number(probe.actionNonHttpCallCount || 0),
+              actionThirdPartyCallCount: Number(probe.actionThirdPartyCallCount || 0),
+              fetchResolvedCount: Number(probe.fetchResolvedCount || 0),
+              fetchRejectedCount: Number(probe.fetchRejectedCount || 0),
+              fetch4xxCount: Number(probe.fetch4xxCount || 0),
+              fetch5xxCount: Number(probe.fetch5xxCount || 0),
+              ...resourceCounts,
+            };
+            if (typeof probe.cleanup === 'function') probe.cleanup();
+            window.__easyProtocolCodexActionProbe = null;
+            return result;
+            """
+        ) or {}
+    except Exception:
+        try:
+            driver.execute_script(
+                """
+                const probe = window.__easyProtocolCodexActionProbe;
+                if (probe && typeof probe.cleanup === 'function') probe.cleanup();
+                window.__easyProtocolCodexActionProbe = null;
+                """
+            )
+        except Exception:
+            pass
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    safe: dict[str, int | bool] = {
+        "available": bool(raw.get("available")),
+        "targetConnected": bool(raw.get("targetConnected")),
+        "defaultPrevented": bool(raw.get("defaultPrevented")),
+    }
+    for key in (
+        "captureCount",
+        "trustedCaptureCount",
+        "bubbleCount",
+        "mutationCount",
+        "formSubmitCount",
+        "windowErrorCount",
+        "unhandledRejectionCount",
+        "resourceErrorCount",
+        "fetchCallCount",
+        "xhrSendCount",
+        "actionAuthAccountsCallCount",
+        "actionOauthCallCount",
+        "actionCodexCallCount",
+        "actionApiCallCount",
+        "actionBackendApiCallCount",
+        "actionCdnCallCount",
+        "actionPickerCallCount",
+        "actionStaticCallCount",
+        "actionOtherAuthCallCount",
+        "actionExternalCallCount",
+        "actionOpenAiCallCount",
+        "actionChatgptCallCount",
+        "actionNonHttpCallCount",
+        "actionThirdPartyCallCount",
+        "fetchResolvedCount",
+        "fetchRejectedCount",
+        "fetch4xxCount",
+        "fetch5xxCount",
+        "resourceCount",
+        "resourceFetchCount",
+        "resourceXhrCount",
+        "resourceStatusUnknownCount",
+        "resource2xxCount",
+        "resource3xxCount",
+        "resource4xxCount",
+        "resource5xxCount",
+        "resource400Count",
+        "resource401Count",
+        "resource403Count",
+        "resource404Count",
+        "resource409Count",
+        "resource429Count",
+        "resourceOther4xxCount",
+        "resourceAuthAccounts4xxCount",
+        "resourceOauth4xxCount",
+        "resourceCodex4xxCount",
+        "resourceAuthOther4xxCount",
+        "resourceExternal4xxCount",
+        "resource403FetchCount",
+        "resource403XhrCount",
+        "resource403ApiCount",
+        "resource403BackendApiCount",
+        "resource403CdnCount",
+        "resource403PickerCount",
+        "resource403StaticCount",
+        "resource403OtherAuthCount",
+        "resourceActionAuthAccountsCount",
+        "resourceActionOauthCount",
+        "resourceActionCodexCount",
+        "resourceActionApiCount",
+        "resourceActionBackendApiCount",
+        "resourceActionCdnCount",
+        "resourceActionPickerCount",
+        "resourceActionStaticCount",
+        "resourceActionOtherAuthCount",
+        "resourceActionExternalCount",
+    ):
+        try:
+            safe[key] = min(999, max(0, int(raw.get(key) or 0)))
+        except (TypeError, ValueError):
+            safe[key] = 0
+    return safe
+
+
+def _browser_codex_action_diagnostics(
+    driver: Any,
+    *,
+    default_email: str,
+    preferred_workspace_id: str,
+) -> dict[str, int | bool]:
+    try:
+        raw = driver.execute_script(
+            """
+            const email = String(arguments[0] || '').trim().toLowerCase();
+            const workspaceId = String(arguments[1] || '').trim().toLowerCase();
+            const elements = Array.from(document.querySelectorAll('body *'));
+            const href = String(location.href || '').toLowerCase();
+            const accountBoundarySelector = [
+              '[role="option"]', '[role="listitem"]', '[data-account-id]', '[data-workspace-id]'
+            ].join(', ');
+            const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const visible = (element) => {
+              try {
+                const rect = element.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0 || element.disabled) return false;
+                for (let current = element; current && current.nodeType === 1; current = current.parentElement) {
+                  const style = window.getComputedStyle(current);
+                  if (current.hidden || current.getAttribute('aria-hidden') === 'true' ||
+                      style.visibility === 'hidden' || style.visibility === 'collapse' ||
+                      style.display === 'none' || Number(style.opacity || '1') <= 0.01 ||
+                      style.pointerEvents === 'none') {
+                    return false;
+                  }
+                }
+                return true;
+              } catch (_error) {
+                return false;
+              }
+            };
+            const accountActionLabel = (element) => normalize([
+              element.innerText || element.textContent || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('title') || '',
+              element.getAttribute('value') || '',
+            ].join(' '));
+            const rejectedAccountAction = (value) => /use another(?: account)?|choose another(?: account)?|switch account|add account|sign out|log out|cancel|(?:^|\\s)back(?:\\s|$)|log in|sign in|create account|register|continue with(?:\\s|$)/.test(
+              normalize(value)
+            );
+            const accountButtonHasForeignIdentity = (element) => {
+              const text = normalize(element.innerText || element.textContent || '');
+              const targetEmails = new Set(
+                text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}/g) || []
+              );
+              if (targetEmails.size && (!email || !targetEmails.has(email))) return true;
+              const targetIds = new Set();
+              for (const node of [element].concat(Array.from(element.querySelectorAll(
+                '[data-account-id], [data-workspace-id]'
+              )))) {
+                const accountId = normalize(node.getAttribute('data-account-id'));
+                const targetWorkspaceId = normalize(node.getAttribute('data-workspace-id'));
+                if (accountId) targetIds.add(accountId);
+                if (targetWorkspaceId) targetIds.add(targetWorkspaceId);
+              }
+              return !!workspaceId && targetIds.size > 0 && !targetIds.has(workspaceId);
+            };
+            const accountButtonHasMultipleIdentities = (element) => {
+              const text = normalize(element.innerText || element.textContent || '');
+              const targetEmails = new Set(
+                text.match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}/g) || []
+              );
+              const accountIds = new Set();
+              const workspaceIds = new Set();
+              for (const node of [element].concat(Array.from(element.querySelectorAll(
+                '[data-account-id], [data-workspace-id]'
+              )))) {
+                const accountId = normalize(node.getAttribute('data-account-id'));
+                const targetWorkspaceId = normalize(node.getAttribute('data-workspace-id'));
+                if (accountId) accountIds.add(accountId);
+                if (targetWorkspaceId) workspaceIds.add(targetWorkspaceId);
+              }
+              const boundaries = [element]
+                .concat(Array.from(element.querySelectorAll(accountBoundarySelector)))
+                .filter((node) => {
+                  try {
+                    return node.matches(accountBoundarySelector);
+                  } catch (_error) {
+                    return false;
+                  }
+                });
+              const leafBoundaryCount = boundaries.filter((node) =>
+                !boundaries.some((other) => other !== node && node.contains(other))
+              ).length;
+              return targetEmails.size > 1 || accountIds.size > 1 || workspaceIds.size > 1 ||
+                leafBoundaryCount > 1;
+            };
+            const accountButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const visibleAccountButtons = accountButtons.filter((element) => visible(element));
+            const accountButtonLabelMatches = (element, pattern) => pattern.test(accountActionLabel(element));
+            const descriptor = (element) => String([
+              element.innerText || element.textContent || '',
+              element.getAttribute('aria-label') || '',
+              element.getAttribute('title') || '',
+              element.getAttribute('value') || '',
+              element.getAttribute('data-account-id') || '',
+              element.getAttribute('data-workspace-id') || '',
+              element.getAttribute('data-testid') || '',
+              element.getAttribute('id') || '',
+              element.getAttribute('class') || '',
+            ].join(' ')).toLowerCase();
+            return {
+              accountBoundaryCount: document.querySelectorAll(accountBoundarySelector).length,
+              accountBusinessButtonCount: visibleAccountButtons.filter((element) =>
+                accountButtonLabelMatches(element, /(?:^|\\s)business(?:\\s|$)/)
+              ).length,
+              accountButtonWithFormCount: visibleAccountButtons.filter((element) =>
+                !!(element.form || element.closest('form'))
+              ).length,
+              accountButtonWithOnClickCount: visibleAccountButtons.filter((element) =>
+                typeof element.onclick === 'function' || element.hasAttribute('onclick')
+              ).length,
+              accountClickableButtonCount: visibleAccountButtons.filter((element) => {
+                const label = accountActionLabel(element);
+                return !!label && !rejectedAccountAction(label) &&
+                  !accountButtonHasForeignIdentity(element) &&
+                  !accountButtonHasMultipleIdentities(element);
+              }).length,
+              accountEligibleButtonCount: visibleAccountButtons.filter((element) => {
+                const label = accountActionLabel(element);
+                return !!label && !rejectedAccountAction(label) &&
+                  !accountButtonHasForeignIdentity(element);
+              }).length,
+              accountForeignButtonCount: visibleAccountButtons.filter((element) =>
+                accountButtonHasForeignIdentity(element)
+              ).length,
+              accountOtherButtonCount: visibleAccountButtons.filter((element) => {
+                const label = accountActionLabel(element);
+                return !!label && !/(?:^|\\s)(?:personal|business|team|workspace)(?:\\s|$)/.test(label) &&
+                  !/^(?:continue|continue to codex)$/.test(label) && !rejectedAccountAction(label);
+              }).length,
+              accountPickerUrl: href.includes('choose-an-account'),
+              accountPersonalButtonCount: visibleAccountButtons.filter((element) =>
+                accountButtonLabelMatches(element, /(?:^|\\s)personal(?:\\s|$)/)
+              ).length,
+              accountRejectedButtonCount: visibleAccountButtons.filter((element) =>
+                rejectedAccountAction(accountActionLabel(element))
+              ).length,
+              accountTeamButtonCount: visibleAccountButtons.filter((element) =>
+                accountButtonLabelMatches(element, /(?:^|\\s)(?:team|workspace)(?:\\s|$)/)
+              ).length,
+              accountContinueButtonCount: visibleAccountButtons.filter((element) =>
+                accountButtonLabelMatches(element, /^(?:continue|continue to codex)$/)
+              ).length,
+              accountVisibleButtonCount: visibleAccountButtons.length,
+              bodyTextLength: String((document.body && document.body.innerText) || '').length,
+              elementCount: elements.length,
+              buttonCount: document.querySelectorAll('button').length,
+              anchorCount: document.querySelectorAll('a').length,
+              formCount: document.querySelectorAll('form').length,
+              inputCount: document.querySelectorAll('input').length,
+              roleButtonCount: document.querySelectorAll('[role="button"]').length,
+              roleOptionCount: document.querySelectorAll('[role="option"], [role="listitem"]').length,
+              tabIndexCount: document.querySelectorAll('[tabindex]').length,
+              iframeCount: document.querySelectorAll('iframe').length,
+              accountSemanticCount: elements.filter((element) => {
+                const semantics = String([
+                  element.getAttribute('data-account-id') || '',
+                  element.getAttribute('data-workspace-id') || '',
+                  element.getAttribute('data-testid') || '',
+                  element.getAttribute('class') || '',
+                  element.getAttribute('id') || '',
+                ].join(' ')).toLowerCase();
+                return !!semantics && /account|workspace/.test(semantics);
+              }).length,
+              emailMatchCount: email ? elements.filter((element) => descriptor(element).includes(email)).length : 0,
+              workspaceMatchCount: workspaceId
+                ? elements.filter((element) => descriptor(element).includes(workspaceId)).length : 0,
+              consentUrl: href.includes('sign-in-with-chatgpt/codex/consent'),
+              hasBody: !!document.body,
+            };
+            """,
+            str(default_email or "").strip(),
+            str(preferred_workspace_id or "").strip(),
+        ) or {}
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        return {}
+    safe: dict[str, int | bool] = {}
+    for key in (
+        "accountBoundaryCount",
+        "accountBusinessButtonCount",
+        "accountButtonWithFormCount",
+        "accountButtonWithOnClickCount",
+        "accountClickableButtonCount",
+        "accountEligibleButtonCount",
+        "accountForeignButtonCount",
+        "accountOtherButtonCount",
+        "accountPersonalButtonCount",
+        "accountRejectedButtonCount",
+        "accountTeamButtonCount",
+        "accountContinueButtonCount",
+        "accountVisibleButtonCount",
+        "bodyTextLength",
+        "elementCount",
+        "buttonCount",
+        "anchorCount",
+        "formCount",
+        "inputCount",
+        "roleButtonCount",
+        "roleOptionCount",
+        "tabIndexCount",
+        "iframeCount",
+        "accountSemanticCount",
+        "emailMatchCount",
+        "workspaceMatchCount",
+    ):
+        try:
+            safe[key] = max(0, int(raw.get(key) or 0))
+        except (TypeError, ValueError):
+            safe[key] = 0
+    safe["accountPickerUrl"] = bool(raw.get("accountPickerUrl"))
+    safe["consentUrl"] = bool(raw.get("consentUrl"))
+    safe["hasBody"] = bool(raw.get("hasBody"))
+    return safe
+
+
+def _browser_switch_to_single_new_window(
+    driver: Any,
+    *,
+    before_handles: list[str],
+) -> tuple[bool, bool]:
+    try:
+        after_handles = [str(handle) for handle in list(driver.window_handles or [])]
+    except Exception:
+        return False, False
+    before = {str(handle) for handle in before_handles}
+    new_handles = [handle for handle in after_handles if handle not in before]
+    if len(new_handles) != 1:
+        return bool(new_handles), False
+    try:
+        driver.switch_to.window(new_handles[0])
+        driver.switch_to.default_content()
+    except Exception:
+        return True, False
+    return True, True
+
+
+def _browser_codex_action_transition_diagnostics(
+    *,
+    action_kind: str,
+    before_url: str,
+    after_url: str,
+    after_diagnostics: dict[str, int | bool],
+    action_metadata: dict[str, str | bool] | None = None,
+    action_probe: dict[str, int | bool] | None = None,
+    new_window_opened: bool = False,
+    new_window_switched: bool = False,
+) -> dict[str, int | bool | str]:
+    normalized_kind = str(action_kind or "").strip().lower()
+    if normalized_kind not in {"account", "consent"}:
+        normalized_kind = "unknown"
+    safe: dict[str, int | bool | str] = {
+        "actionKind": normalized_kind,
+        "urlChanged": bool(before_url and after_url and before_url != after_url),
+    }
+    metadata = action_metadata if isinstance(action_metadata, dict) else {}
+    action_mode = str(metadata.get("mode") or "").strip().lower()
+    if action_mode not in {
+        "identity_tied_button",
+        "identity_ranked",
+        "generic_single",
+        "button_single",
+        "consent_single",
+    }:
+        action_mode = "unknown"
+    target_tag = str(metadata.get("tag") or "").strip().lower()
+    if target_tag not in {"button", "a", "div", "li", "label", "input", "span"}:
+        target_tag = "other"
+    safe["actionMode"] = action_mode
+    safe["targetTag"] = target_tag
+    safe["targetIsButton"] = bool(metadata.get("isButton"))
+    safe["targetDisabled"] = bool(metadata.get("disabled"))
+    aria_disabled = str(metadata.get("ariaDisabled") or "").strip().lower()
+    safe["targetAriaDisabled"] = (
+        aria_disabled if aria_disabled in {"true", "false", "absent", "other"} else "other"
+    )
+    button_type = str(metadata.get("buttonType") or "").strip().lower()
+    safe["targetButtonType"] = (
+        button_type if button_type in {"submit", "button", "reset", "other"} else "other"
+    )
+    safe["targetHasForm"] = bool(metadata.get("hasForm"))
+    safe["targetHasOnClick"] = bool(metadata.get("hasOnClick"))
+    safe["targetHasReactOnClick"] = bool(metadata.get("hasReactOnClick"))
+    probe = action_probe if isinstance(action_probe, dict) else {}
+    safe["clickProbeAvailable"] = bool(probe.get("available"))
+    safe["targetConnectedAfter"] = bool(probe.get("targetConnected"))
+    safe["clickDefaultPrevented"] = bool(probe.get("defaultPrevented"))
+    for key in (
+        "captureCount",
+        "trustedCaptureCount",
+        "bubbleCount",
+        "mutationCount",
+        "formSubmitCount",
+        "windowErrorCount",
+        "unhandledRejectionCount",
+        "resourceErrorCount",
+        "fetchCallCount",
+        "xhrSendCount",
+        "actionAuthAccountsCallCount",
+        "actionOauthCallCount",
+        "actionCodexCallCount",
+        "actionApiCallCount",
+        "actionBackendApiCallCount",
+        "actionCdnCallCount",
+        "actionPickerCallCount",
+        "actionStaticCallCount",
+        "actionOtherAuthCallCount",
+        "actionExternalCallCount",
+        "actionOpenAiCallCount",
+        "actionChatgptCallCount",
+        "actionNonHttpCallCount",
+        "actionThirdPartyCallCount",
+        "fetchResolvedCount",
+        "fetchRejectedCount",
+        "fetch4xxCount",
+        "fetch5xxCount",
+        "resourceCount",
+        "resourceFetchCount",
+        "resourceXhrCount",
+        "resourceStatusUnknownCount",
+        "resource2xxCount",
+        "resource3xxCount",
+        "resource4xxCount",
+        "resource5xxCount",
+        "resource400Count",
+        "resource401Count",
+        "resource403Count",
+        "resource404Count",
+        "resource409Count",
+        "resource429Count",
+        "resourceOther4xxCount",
+        "resourceAuthAccounts4xxCount",
+        "resourceOauth4xxCount",
+        "resourceCodex4xxCount",
+        "resourceAuthOther4xxCount",
+        "resourceExternal4xxCount",
+        "resource403FetchCount",
+        "resource403XhrCount",
+        "resource403ApiCount",
+        "resource403BackendApiCount",
+        "resource403CdnCount",
+        "resource403PickerCount",
+        "resource403StaticCount",
+        "resource403OtherAuthCount",
+        "resourceActionAuthAccountsCount",
+        "resourceActionOauthCount",
+        "resourceActionCodexCount",
+        "resourceActionApiCount",
+        "resourceActionBackendApiCount",
+        "resourceActionCdnCount",
+        "resourceActionPickerCount",
+        "resourceActionStaticCount",
+        "resourceActionOtherAuthCount",
+        "resourceActionExternalCount",
+    ):
+        try:
+            safe[key] = min(999, max(0, int(probe.get(key) or 0)))
+        except (TypeError, ValueError):
+            safe[key] = 0
+    safe["newWindowOpened"] = bool(new_window_opened)
+    safe["newWindowSwitched"] = bool(new_window_switched)
+    for key in (
+        "accountBoundaryCount",
+        "accountBusinessButtonCount",
+        "accountButtonWithFormCount",
+        "accountButtonWithOnClickCount",
+        "accountClickableButtonCount",
+        "accountContinueButtonCount",
+        "accountEligibleButtonCount",
+        "accountForeignButtonCount",
+        "accountOtherButtonCount",
+        "accountPersonalButtonCount",
+        "accountRejectedButtonCount",
+        "accountTeamButtonCount",
+        "accountVisibleButtonCount",
+    ):
+        try:
+            safe[key] = max(0, int(after_diagnostics.get(key) or 0))
+        except (TypeError, ValueError):
+            safe[key] = 0
+    safe["accountPickerUrl"] = bool(after_diagnostics.get("accountPickerUrl"))
+    safe["consentUrl"] = bool(after_diagnostics.get("consentUrl"))
+    safe["hasBody"] = bool(after_diagnostics.get("hasBody"))
+    return safe
+
+
+def _browser_codex_action_trace_summary(
+    summary: dict[str, int | bool | str],
+    transition: dict[str, int | bool | str],
+) -> dict[str, int | bool | str]:
+    safe: dict[str, int | bool | str] = {
+        "count": max(0, int(summary.get("count") or 0)) + 1,
+        "urlChangedCount": max(0, int(summary.get("urlChangedCount") or 0))
+        + int(bool(transition.get("urlChanged"))),
+        "accountPickerAfterCount": max(0, int(summary.get("accountPickerAfterCount") or 0))
+        + int(bool(transition.get("accountPickerUrl"))),
+        "consentAfterCount": max(0, int(summary.get("consentAfterCount") or 0))
+        + int(bool(transition.get("consentUrl"))),
+        "lastActionKind": str(transition.get("actionKind") or "unknown"),
+        "lastActionMode": str(transition.get("actionMode") or "unknown"),
+        "lastTargetTag": str(transition.get("targetTag") or "other"),
+        "lastTargetIsButton": bool(transition.get("targetIsButton")),
+        "lastTargetDisabled": bool(transition.get("targetDisabled")),
+        "lastTargetAriaDisabled": str(transition.get("targetAriaDisabled") or "other"),
+        "lastTargetButtonType": str(transition.get("targetButtonType") or "other"),
+        "lastTargetHasForm": bool(transition.get("targetHasForm")),
+        "lastTargetHasOnClick": bool(transition.get("targetHasOnClick")),
+        "lastTargetHasReactOnClick": bool(transition.get("targetHasReactOnClick")),
+        "lastClickProbeAvailable": bool(transition.get("clickProbeAvailable")),
+        "lastTargetConnectedAfter": bool(transition.get("targetConnectedAfter")),
+        "lastClickDefaultPrevented": bool(transition.get("clickDefaultPrevented")),
+        "lastCaptureCount": min(999, max(0, int(transition.get("captureCount") or 0))),
+        "lastTrustedCaptureCount": min(
+            999,
+            max(0, int(transition.get("trustedCaptureCount") or 0)),
+        ),
+        "lastBubbleCount": min(999, max(0, int(transition.get("bubbleCount") or 0))),
+        "lastMutationCount": min(999, max(0, int(transition.get("mutationCount") or 0))),
+        "lastNewWindowOpened": bool(transition.get("newWindowOpened")),
+        "lastNewWindowSwitched": bool(transition.get("newWindowSwitched")),
+        "lastAccountPickerUrl": bool(transition.get("accountPickerUrl")),
+        "lastConsentUrl": bool(transition.get("consentUrl")),
+        "lastHasBody": bool(transition.get("hasBody")),
+    }
+    for source_key, target_key in (
+        ("formSubmitCount", "lastFormSubmitCount"),
+        ("windowErrorCount", "lastWindowErrorCount"),
+        ("unhandledRejectionCount", "lastUnhandledRejectionCount"),
+        ("resourceErrorCount", "lastResourceErrorCount"),
+        ("fetchCallCount", "lastFetchCallCount"),
+        ("xhrSendCount", "lastXhrSendCount"),
+        ("actionAuthAccountsCallCount", "lastActionAuthAccountsCallCount"),
+        ("actionOauthCallCount", "lastActionOauthCallCount"),
+        ("actionCodexCallCount", "lastActionCodexCallCount"),
+        ("actionApiCallCount", "lastActionApiCallCount"),
+        ("actionBackendApiCallCount", "lastActionBackendApiCallCount"),
+        ("actionCdnCallCount", "lastActionCdnCallCount"),
+        ("actionPickerCallCount", "lastActionPickerCallCount"),
+        ("actionStaticCallCount", "lastActionStaticCallCount"),
+        ("actionOtherAuthCallCount", "lastActionOtherAuthCallCount"),
+        ("actionExternalCallCount", "lastActionExternalCallCount"),
+        ("actionOpenAiCallCount", "lastActionOpenAiCallCount"),
+        ("actionChatgptCallCount", "lastActionChatgptCallCount"),
+        ("actionNonHttpCallCount", "lastActionNonHttpCallCount"),
+        ("actionThirdPartyCallCount", "lastActionThirdPartyCallCount"),
+        ("fetchResolvedCount", "lastFetchResolvedCount"),
+        ("fetchRejectedCount", "lastFetchRejectedCount"),
+        ("fetch4xxCount", "lastFetch4xxCount"),
+        ("fetch5xxCount", "lastFetch5xxCount"),
+        ("resourceCount", "lastResourceCount"),
+        ("resourceFetchCount", "lastResourceFetchCount"),
+        ("resourceXhrCount", "lastResourceXhrCount"),
+        ("resourceStatusUnknownCount", "lastResourceStatusUnknownCount"),
+        ("resource2xxCount", "lastResource2xxCount"),
+        ("resource3xxCount", "lastResource3xxCount"),
+        ("resource4xxCount", "lastResource4xxCount"),
+        ("resource5xxCount", "lastResource5xxCount"),
+        ("resource403Count", "lastResource403Count"),
+        ("resource403FetchCount", "lastResource403FetchCount"),
+        ("resource403XhrCount", "lastResource403XhrCount"),
+        ("resource403ApiCount", "lastResource403ApiCount"),
+        ("resource403BackendApiCount", "lastResource403BackendApiCount"),
+        ("resource403CdnCount", "lastResource403CdnCount"),
+        ("resource403PickerCount", "lastResource403PickerCount"),
+        ("resource403StaticCount", "lastResource403StaticCount"),
+        ("resource403OtherAuthCount", "lastResource403OtherAuthCount"),
+        ("resourceActionAuthAccountsCount", "lastResourceActionAuthAccountsCount"),
+        ("resourceActionOauthCount", "lastResourceActionOauthCount"),
+        ("resourceActionCodexCount", "lastResourceActionCodexCount"),
+        ("resourceActionApiCount", "lastResourceActionApiCount"),
+        ("resourceActionBackendApiCount", "lastResourceActionBackendApiCount"),
+        ("resourceActionCdnCount", "lastResourceActionCdnCount"),
+        ("resourceActionPickerCount", "lastResourceActionPickerCount"),
+        ("resourceActionStaticCount", "lastResourceActionStaticCount"),
+        ("resourceActionOtherAuthCount", "lastResourceActionOtherAuthCount"),
+        ("resourceActionExternalCount", "lastResourceActionExternalCount"),
+    ):
+        try:
+            safe[target_key] = min(999, max(0, int(transition.get(source_key) or 0)))
+        except (TypeError, ValueError):
+            safe[target_key] = 0
+    for source_key, target_key in (
+        ("accountClickableButtonCount", "lastAccountClickableButtonCount"),
+        ("accountPersonalButtonCount", "lastAccountPersonalButtonCount"),
+        ("accountBusinessButtonCount", "lastAccountBusinessButtonCount"),
+        ("accountTeamButtonCount", "lastAccountTeamButtonCount"),
+        ("accountContinueButtonCount", "lastAccountContinueButtonCount"),
+        ("accountOtherButtonCount", "lastAccountOtherButtonCount"),
+        ("accountButtonWithFormCount", "lastAccountButtonWithFormCount"),
+        ("accountButtonWithOnClickCount", "lastAccountButtonWithOnClickCount"),
+    ):
+        try:
+            safe[target_key] = max(0, int(transition.get(source_key) or 0))
+        except (TypeError, ValueError):
+            safe[target_key] = 0
+    return safe
+
+
+def _browser_codex_action_trace_log_payload(
+    summary: dict[str, int | bool | str],
+) -> dict[str, int | bool | str]:
+    return {
+        "n": max(0, int(summary.get("count") or 0)),
+        "nav": max(0, int(summary.get("urlChangedCount") or 0)),
+        "picker": max(0, int(summary.get("accountPickerAfterCount") or 0)),
+        "fc": min(999, max(0, int(summary.get("lastFetchCallCount") or 0))),
+        "xc": min(999, max(0, int(summary.get("lastXhrSendCount") or 0))),
+        "aa": min(999, max(0, int(summary.get("lastActionAuthAccountsCallCount") or 0))),
+        "ao": min(999, max(0, int(summary.get("lastActionOauthCallCount") or 0))),
+        "ac": min(999, max(0, int(summary.get("lastActionCodexCallCount") or 0))),
+        "ai": min(999, max(0, int(summary.get("lastActionApiCallCount") or 0))),
+        "ba": min(999, max(0, int(summary.get("lastActionBackendApiCallCount") or 0))),
+        "ex": min(999, max(0, int(summary.get("lastActionExternalCallCount") or 0))),
+        "tr": min(999, max(0, int(summary.get("lastTrustedCaptureCount") or 0))),
+        "oi": min(999, max(0, int(summary.get("lastActionOpenAiCallCount") or 0))),
+        "cg": min(999, max(0, int(summary.get("lastActionChatgptCallCount") or 0))),
+        "nh": min(999, max(0, int(summary.get("lastActionNonHttpCallCount") or 0))),
+        "tp": min(999, max(0, int(summary.get("lastActionThirdPartyCallCount") or 0))),
+        "fr": min(999, max(0, int(summary.get("lastFetchResolvedCount") or 0))),
+        "fj": min(999, max(0, int(summary.get("lastFetchRejectedCount") or 0))),
+        "f4": min(999, max(0, int(summary.get("lastFetch4xxCount") or 0))),
+        "f5": min(999, max(0, int(summary.get("lastFetch5xxCount") or 0))),
+        "mut": min(999, max(0, int(summary.get("lastMutationCount") or 0))),
+        "dp": bool(summary.get("lastClickDefaultPrevented")),
+        "cb": min(999, max(0, int(summary.get("lastAccountClickableButtonCount") or 0))),
+    }
+
+
+def _browser_codex_handoff_incomplete_message(
+    *,
+    action_count: int,
+    action_trace: dict[str, int | bool | str],
+    ready_state: str,
+    final_url: str,
+    action_diagnostics: dict[str, int | bool],
+) -> str:
+    return (
+        "codex_browser_handoff_incomplete "
+        f"actions={action_count} "
+        f"trace={json.dumps(_browser_codex_action_trace_log_payload(action_trace), separators=(',', ':'))} "
+        f"ready_state={str(ready_state or 'unknown')} "
+        f"current={_format_logged_url(final_url)} "
+        f"diagnostics={json.dumps(action_diagnostics, sort_keys=True, separators=(',', ':'))}"
+    )
+
+
+def _complete_codex_oauth_with_browser(
+    *,
+    session: requests.Session,
+    oauth: Any,
+    explicit_proxy: str | None,
+    default_email: str,
+    preferred_workspace_id: str,
+    entry_url: str = "",
+) -> tuple[str, Any | None]:
+    new_driver = _load_protocol_browser_new_driver()
+    driver = None
+    proxy_dir = None
+    final_url = ""
+    final_page_state: dict[str, Any] = {}
+    action_count = 0
+    action_trace: dict[str, int | bool | str] = {}
+    auth_root_recovery_count = 0
+    driver_cleanup_user_data_dir = ""
+    try:
+        driver, proxy_dir = new_driver(
+            explicit_proxy,
+            browser_backend=_protocol_browser_native_backend(),
+        )
+        driver_cleanup_user_data_dir = str(
+            getattr(driver, "_protocol_cleanup_user_data_dir", "") or ""
+        ).strip()
+        imported_cookie_count = _hydrate_browser_driver_with_protocol_session_cookies(
+            driver,
+            session=session,
+        )
+        if imported_cookie_count <= 0:
+            raise RuntimeError("codex_browser_handoff_no_imported_cookies")
+        browser_entry_url = str(entry_url or oauth.auth_url or "").strip()
+        if not _is_trusted_codex_browser_entry_url(browser_entry_url):
+            raise RuntimeError("codex_browser_entry_url_invalid")
+        driver.get(browser_entry_url)
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline:
+            final_url = str(getattr(driver, "current_url", "") or "").strip()
+            if _callback_matches_redirect_uri(
+                callback_url=final_url,
+                redirect_uri=str(oauth.redirect_uri or ""),
+            ):
+                return final_url, None
+
+            if (
+                action_count > 0
+                and auth_root_recovery_count < 1
+                and _is_codex_auth_root_url(final_url)
+            ):
+                auth_root_recovery_count += 1
+                setattr(driver, "_protocol_last_codex_account_picker_action_key", "")
+                driver.get(str(oauth.auth_url or "").strip())
+                time.sleep(1.0)
+                continue
+
+            final_page_state = _browser_collect_page_state(driver)
+            combined_page_text = "\n".join(
+                (
+                    final_url,
+                    str(final_page_state.get("title") or ""),
+                    str(final_page_state.get("bodyText") or ""),
+                )
+            )
+            if _is_phone_wall_text(combined_page_text):
+                _import_browser_driver_cookies_into_session(session, driver=driver)
+                phone_response = _session_request(
+                    session,
+                    "GET",
+                    final_url,
+                    explicit_proxy=explicit_proxy,
+                    request_label="oauth-browser-handoff-phone-wall",
+                    allow_redirects=False,
+                    timeout=20,
+                    headers={
+                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "referer": oauth.auth_url,
+                    },
+                )
+                return "", phone_response
+            if _browser_page_is_cloudflare_wait(final_page_state):
+                _browser_nudge_challenge_page(driver)
+            native_workspace_continue_url, native_workspace_outcome = (
+                _browser_try_submit_codex_workspace_selection(
+                    driver,
+                    preferred_workspace_id=preferred_workspace_id,
+                )
+            )
+            if native_workspace_outcome not in {"not_applicable", "already_attempted"}:
+                print(
+                    "[python-protocol-service] codex browser native workspace selection "
+                    f"outcome={native_workspace_outcome}"
+                )
+            if native_workspace_continue_url:
+                driver.get(native_workspace_continue_url)
+                time.sleep(0.5)
+                continue
+            try:
+                window_handles_before = [str(handle) for handle in list(driver.window_handles or [])]
+            except Exception:
+                window_handles_before = []
+            clicked_kind = _browser_try_click_codex_oauth_action(
+                driver,
+                default_email=default_email,
+                preferred_workspace_id=preferred_workspace_id,
+            )
+            if clicked_kind:
+                before_action_url = final_url
+                action_count += 1
+                print(
+                    "[python-protocol-service] codex browser handoff action "
+                    f"kind={clicked_kind} count={action_count}"
+                )
+                time.sleep(4.0)
+                action_probe = _browser_codex_action_probe(driver)
+                new_window_opened, new_window_switched = _browser_switch_to_single_new_window(
+                    driver,
+                    before_handles=window_handles_before,
+                )
+                after_action_url = str(getattr(driver, "current_url", "") or "").strip()
+                action_trace = _browser_codex_action_trace_summary(
+                    action_trace,
+                    _browser_codex_action_transition_diagnostics(
+                        action_kind=clicked_kind,
+                        before_url=before_action_url,
+                        after_url=after_action_url,
+                        action_metadata=getattr(
+                            driver,
+                            "_protocol_last_codex_action_metadata",
+                            None,
+                        ),
+                        action_probe=action_probe,
+                        new_window_opened=new_window_opened,
+                        new_window_switched=new_window_switched,
+                        after_diagnostics=_browser_codex_action_diagnostics(
+                            driver,
+                            default_email=default_email,
+                            preferred_workspace_id=preferred_workspace_id,
+                        ),
+                    )
+                )
+                continue
+            time.sleep(0.5)
+
+        action_diagnostics = _browser_codex_action_diagnostics(
+            driver,
+            default_email=default_email,
+            preferred_workspace_id=preferred_workspace_id,
+        )
+        raise RuntimeError(
+            _browser_codex_handoff_incomplete_message(
+                action_count=action_count,
+                action_trace=action_trace,
+                ready_state=str(final_page_state.get("readyState") or "unknown"),
+                final_url=final_url,
+                action_diagnostics=action_diagnostics,
+            )
+        )
+    finally:
+        if driver is not None:
+            try:
+                _sync_browser_driver_user_agent_to_session(session, driver=driver)
+            except Exception:
+                pass
+            try:
+                _import_browser_driver_cookies_into_session(session, driver=driver)
+            except Exception:
+                pass
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        cleanup_dirs = (
+            str(proxy_dir or "").strip(),
+            driver_cleanup_user_data_dir,
+        )
+        for cleanup_dir in cleanup_dirs:
+            if cleanup_dir:
+                try:
+                    shutil.rmtree(cleanup_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+
+def _build_workspace_selection_headers(
+    *,
+    session: requests.Session,
+    referer: str,
+    header_builder: ProtocolSentinelContext | None,
+) -> dict[str, str]:
+    headers = _build_protocol_headers(
+        request_kind="workspace-select",
+        referer=referer,
+        sentinel_context=header_builder,
+    )
+    if header_builder is None:
+        session_headers = getattr(session, "headers", None)
+        session_user_agent = ""
+        if callable(getattr(session_headers, "get", None)):
+            session_user_agent = str(
+                session_headers.get("user-agent")
+                or session_headers.get("User-Agent")
+                or ""
+            ).strip()
+        if session_user_agent:
+            headers["user-agent"] = session_user_agent
+    headers.update(
+        _browser_client_hints_for_user_agent(str(headers.get("user-agent") or ""))
+    )
+    return headers
+
+
 def _submit_workspace_selection_for_callback(
     *,
     session: requests.Session,
@@ -8347,18 +10309,18 @@ def _submit_workspace_selection_for_callback(
         WORKSPACE_SELECT_URL,
         explicit_proxy=explicit_proxy,
         request_label=workspace_request_label,
-        headers=_build_protocol_headers(
-            request_kind="workspace-select",
+        headers=_build_workspace_selection_headers(
+            session=session,
             referer=referer,
-            sentinel_context=header_builder,
+            header_builder=header_builder,
         ),
         data=json.dumps({"workspace_id": normalized_workspace_id}),
     )
+    _raise_if_phone_wall_response(workspace_response, context="workspace_select")
     if workspace_response.status_code != 200:
         raise RuntimeError(
             f"workspace_select status={workspace_response.status_code} body={_response_preview(workspace_response)}"
         )
-    _raise_if_phone_wall_response(workspace_response, context="workspace_select")
 
     continue_url = str((workspace_response.json() or {}).get("continue_url") or "").strip()
     if not continue_url:
@@ -8385,16 +10347,20 @@ def _exchange_authenticated_session_for_codex_result(
     birthdate: str,
     workspace_request_label: str,
     header_builder: ProtocolSentinelContext | None = None,
+    preferred_workspace_id: str = "",
+    workspace_referer: str = CONSENT_REFERER,
 ) -> ProtocolRegistrationResult:
-    workspace_id = _extract_workspace_id_from_session(
-        session,
-        explicit_proxy=explicit_proxy,
-    )
+    workspace_id = str(preferred_workspace_id or "").strip()
+    if not workspace_id:
+        workspace_id = _extract_workspace_id_from_session(
+            session,
+            explicit_proxy=explicit_proxy,
+        )
     callback_url = _submit_workspace_selection_for_callback(
         session=session,
         workspace_id=workspace_id,
         explicit_proxy=explicit_proxy,
-        referer=CONSENT_REFERER,
+        referer=str(workspace_referer or "").strip() or CONSENT_REFERER,
         workspace_request_label=workspace_request_label,
         header_builder=header_builder,
     )
@@ -8513,6 +10479,7 @@ def _handoff_authenticated_chatgpt_session_to_codex(
     first_name: str,
     last_name: str,
     birthdate: str,
+    preferred_workspace_id: str = "",
 ) -> ProtocolRegistrationResult:
     if not env_flag(PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV, True):
         raise RuntimeError("browser_stage2_handoff_disabled")
@@ -8521,6 +10488,33 @@ def _handoff_authenticated_chatgpt_session_to_codex(
         f"email={email} strategy=session_handoff_without_password"
     )
     oauth = generate_oauth_url(prompt=None)
+
+    def _phone_verification_result(phone_exc: _PhoneWallResponseError) -> ProtocolRegistrationResult:
+        user_agent = str(getattr(session, "headers", {}).get("user-agent") or DEFAULT_PROTOCOL_USER_AGENT).strip()
+        device_id = _get_session_cookie(
+            session,
+            "oai-did",
+            preferred_domains=("auth.openai.com", ".openai.com", "chatgpt.com", ".chatgpt.com"),
+        )
+        return _build_phone_verification_required_result(
+            email=email,
+            auth_obj={
+                "email": email,
+                "mailbox_ref": mailbox_ref,
+                "mailboxRef": mailbox_ref,
+                "mailboxAccessKey": mailbox_ref,
+                "first_name": first_name,
+                "last_name": last_name,
+                "birthdate": birthdate,
+            },
+            response=phone_exc.response,
+            context=f"session_handoff_{phone_exc.context}",
+            session=session,
+            oauth=oauth,
+            user_agent=user_agent,
+            device_id=device_id,
+        )
+
     response = _session_request(
         session,
         "GET",
@@ -8533,6 +10527,10 @@ def _handoff_authenticated_chatgpt_session_to_codex(
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         },
     )
+    if _response_has_phone_wall(response):
+        return _phone_verification_result(
+            _PhoneWallResponseError(response=response, context="authorize")
+        )
     location = str(
         response.headers.get("Location")
         or response.headers.get("location")
@@ -8556,9 +10554,47 @@ def _handoff_authenticated_chatgpt_session_to_codex(
             birthdate=birthdate,
             token_post_try_direct_first=True,
         )
-        return _maybe_recover_personal_protocol_result(
+        try:
+            return _maybe_recover_personal_protocol_result(
+                session=session,
+                initial_result=initial_result,
+                oauth=oauth,
+                explicit_proxy=explicit_proxy,
+                default_email=email,
+                mailbox_ref=mailbox_ref,
+                password="",
+                first_name=first_name,
+                last_name=last_name,
+                birthdate=birthdate,
+                workspace_request_label="workspace-select-handoff-direct-personal-recovery",
+                header_builder=None,
+            )
+        except _PhoneWallResponseError as phone_exc:
+            return _phone_verification_result(phone_exc)
+
+    workspace_referer = CONSENT_REFERER
+    browser_handoff_error = ""
+    if next_url:
+        primed_response = _session_request(
+            session,
+            "GET",
+            next_url,
+            explicit_proxy=explicit_proxy,
+            request_label="oauth-authorize-codex-handoff-prime",
+            allow_redirects=False,
+            timeout=20,
+            headers={
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "referer": oauth.auth_url,
+            },
+        )
+        if _response_has_phone_wall(primed_response):
+            return _phone_verification_result(
+                _PhoneWallResponseError(response=primed_response, context="authorize_prime")
+            )
+        primed_result = _maybe_finish_codex_oauth_from_response(
             session=session,
-            initial_result=initial_result,
+            response=primed_response,
             oauth=oauth,
             explicit_proxy=explicit_proxy,
             default_email=email,
@@ -8567,8 +10603,77 @@ def _handoff_authenticated_chatgpt_session_to_codex(
             first_name=first_name,
             last_name=last_name,
             birthdate=birthdate,
-            workspace_request_label="workspace-select-handoff-direct-personal-recovery",
-            header_builder=None,
+            referer=oauth.auth_url,
+            context_label="oauth-authorize-codex-handoff-prime",
+        )
+        if primed_result is not None:
+            return primed_result
+        if _is_codex_account_picker_response(primed_response):
+            try:
+                print("[python-protocol-service] codex session handoff using browser account picker")
+                browser_entry_url = _codex_account_picker_entry_url(
+                    primed_response,
+                    fallback_url=next_url,
+                )
+                if not browser_entry_url:
+                    raise RuntimeError("codex_browser_entry_url_invalid")
+                browser_callback_url, browser_phone_response = _complete_codex_oauth_with_browser(
+                    session=session,
+                    oauth=oauth,
+                    explicit_proxy=explicit_proxy,
+                    default_email=email,
+                    preferred_workspace_id=preferred_workspace_id,
+                    entry_url=browser_entry_url,
+                )
+                if browser_phone_response is not None:
+                    return _phone_verification_result(
+                        _PhoneWallResponseError(
+                            response=browser_phone_response,
+                            context="browser_account_picker",
+                        )
+                    )
+                browser_initial_result = _callback_result_from_url(
+                    callback_url=browser_callback_url,
+                    oauth=oauth,
+                    explicit_proxy=explicit_proxy,
+                    default_email=email,
+                    mailbox_ref=mailbox_ref,
+                    password="",
+                    first_name=first_name,
+                    last_name=last_name,
+                    birthdate=birthdate,
+                    token_post_try_direct_first=True,
+                )
+                return _maybe_recover_personal_protocol_result(
+                    session=session,
+                    initial_result=browser_initial_result,
+                    oauth=oauth,
+                    explicit_proxy=explicit_proxy,
+                    default_email=email,
+                    mailbox_ref=mailbox_ref,
+                    password="",
+                    first_name=first_name,
+                    last_name=last_name,
+                    birthdate=birthdate,
+                    workspace_request_label="workspace-select-handoff-browser-personal-recovery",
+                    header_builder=None,
+                )
+            except _PhoneWallResponseError as phone_exc:
+                return _phone_verification_result(phone_exc)
+            except Exception as browser_exc:
+                browser_handoff_error = _codex_browser_handoff_error_code(browser_exc)
+                print(
+                    "[python-protocol-service] codex browser account picker failed; "
+                    f"falling back to workspace exchange err={browser_handoff_error}"
+                )
+        primed_location = _response_location(primed_response)
+        workspace_referer = (
+            urllib.parse.urljoin(
+                _response_url(primed_response) or next_url,
+                primed_location,
+            )
+            if primed_location
+            else _response_url(primed_response) or next_url
         )
 
     try:
@@ -8588,7 +10693,11 @@ def _handoff_authenticated_chatgpt_session_to_codex(
             birthdate=birthdate,
             workspace_request_label="workspace-select-codex-handoff",
             header_builder=None,
+            preferred_workspace_id=preferred_workspace_id,
+            workspace_referer=workspace_referer,
         )
+    except _PhoneWallResponseError as phone_exc:
+        return _phone_verification_result(phone_exc)
     except RuntimeError as workspace_exc:
         if next_url:
             try:
@@ -8628,19 +10737,45 @@ def _handoff_authenticated_chatgpt_session_to_codex(
                     workspace_request_label="workspace-select-handoff-redirect-personal-recovery",
                     header_builder=None,
                 )
+            except _PhoneWallResponseError as phone_exc:
+                return _phone_verification_result(phone_exc)
             except RuntimeError as redirect_exc:
                 raise RuntimeError(
                     "codex_session_handoff_failed "
                     "strategy=session_handoff_without_password "
-                    f"status={response.status_code} location={next_url or '<none>'} "
+                    f"status={response.status_code} location={_format_logged_url(next_url)} "
+                    f"browser_err={browser_handoff_error or '<none>'} "
                     f"workspace_err={workspace_exc} redirect_err={redirect_exc}"
                 ) from redirect_exc
         raise RuntimeError(
             "codex_session_handoff_failed "
             "strategy=session_handoff_without_password "
-            f"status={response.status_code} location={next_url or '<none>'} "
+            f"status={response.status_code} location={_format_logged_url(next_url)} "
             f"workspace_err={workspace_exc} body={_response_preview(response, 200)}"
         ) from workspace_exc
+
+
+def handoff_authenticated_chatgpt_session_to_codex(
+    *,
+    session: requests.Session,
+    explicit_proxy: str | None,
+    email: str,
+    mailbox_ref: str,
+    first_name: str,
+    last_name: str,
+    birthdate: str,
+    preferred_workspace_id: str = "",
+) -> ProtocolRegistrationResult:
+    return _handoff_authenticated_chatgpt_session_to_codex(
+        session=session,
+        explicit_proxy=explicit_proxy,
+        email=email,
+        mailbox_ref=mailbox_ref,
+        first_name=first_name,
+        last_name=last_name,
+        birthdate=birthdate,
+        preferred_workspace_id=preferred_workspace_id,
+    )
 
 
 def _session_request(
@@ -8650,8 +10785,10 @@ def _session_request(
     *,
     explicit_proxy: str | None,
     request_label: str,
+    allow_transport_fallback: bool = True,
     **kwargs: Any,
 ) -> Any:
+    allow_transport_fallback = bounded_attempts(2) > 1 and allow_transport_fallback
     decision = resolve_system_native_proxy_decision(url, explicit_proxy=explicit_proxy)
     debug_log_system_native_proxy_decision(
         "python-protocol",
@@ -8678,11 +10815,11 @@ def _session_request(
             or "curl: (55)" in message
             or "send failure: connection was aborted" in message
         )
-        if not is_tls_transport_failure:
+        if not allow_transport_fallback or not is_tls_transport_failure:
             raise
         print(
             "[python-protocol-service] curl transport failed, falling back to urllib "
-            f"label={request_label} url={url} err={exc}"
+            f"label={request_label} url={_format_logged_url(url)} err={exc}"
         )
         return _session_request_via_urllib(
             session=session,

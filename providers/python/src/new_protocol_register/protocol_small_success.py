@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import secrets
+import tempfile
 import time
 import urllib.parse
 import uuid
 import contextlib
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -45,6 +47,8 @@ from shared_mailbox.easy_email_client import get_mailbox_latest_message_id, rele
 from shared_proxy import env_flag, normalize_proxy_env_url
 
 from protocol_runtime.errors import ProtocolRuntimeError, ensure_protocol_runtime_error
+from protocol_runtime.attempt_limits import bounded_attempts
+from new_protocol_register.protocol_auth_state import bind_browser_auth_session, decode_minimized_session
 from protocol_runtime.protocol_register import (
     ABOUT_YOU_REFERER,
     AUTH_BASE,
@@ -54,6 +58,7 @@ from protocol_runtime.protocol_register import (
     CREATE_ACCOUNT_URL,
     DEFAULT_OTP_TIMEOUT_SECONDS,
     DEFAULT_PROTOCOL_USER_AGENT,
+    EMAIL_OTP_SEND_URL,
     EMAIL_OTP_VALIDATE_URL,
     EMAIL_VERIFICATION_REFERER,
     LOGIN_OR_CREATE_ACCOUNT_REFERER,
@@ -63,6 +68,7 @@ from protocol_runtime.protocol_register import (
     PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV,
     PROTOCOL_ENABLE_BROWSER_SENTINEL_ENV,
     PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV,
+    PROTOCOL_ENABLE_EMAIL_OTP_SEND_ENV,
     USER_REGISTER_URL,
     _build_protocol_headers,
     _clone_protocol_sentinel_context,
@@ -72,13 +78,14 @@ from protocol_runtime.protocol_register import (
     _get_sentinel_header_for_signup,
     _new_protocol_sentinel_context,
     _maybe_prime_protocol_auth_session_with_browser,
-    _normalize_auth_url_device_id,
+    _import_browser_driver_cookies_into_session,
     _protocol_auth_cookie_summary,
     _random_birthdate,
     _response_continue_url,
     _response_error_code,
     _response_has_phone_wall,
     _response_has_cloudflare_challenge,
+    _response_header,
     _response_preview,
     _send_email_otp,
     _session_request,
@@ -189,6 +196,30 @@ def _open_platform_login(*, session: requests.Session, explicit_proxy: str | Non
     return response
 
 
+def _open_optional_platform_login(
+    *, session: requests.Session, explicit_proxy: str | None,
+) -> requests.Response | None:
+    """Warm the public landing page; OAuth authorization validates login state."""
+    try:
+        return _open_platform_login(session=session, explicit_proxy=explicit_proxy)
+    except ProtocolRuntimeError as exc:
+        if not (
+            exc.stage == "stage_platform_login"
+            and exc.detail == "platform_login"
+            and exc.category == "blocked"
+            and "browser_verification_required" in str(exc)
+        ):
+            raise
+        # The public landing page can be blocked while the OAuth entry works.
+        # Return no response; never represent that block as a successful login.
+        print(
+            "[protocol-small-success] public landing page blocked; "
+            "continuing to authoritative OAuth validation",
+            flush=True,
+        )
+        return None
+
+
 def _open_login_or_create_account(*, session: requests.Session, explicit_proxy: str | None) -> Any:
     response = _session_request(
         session,
@@ -227,6 +258,8 @@ def _submit_email_otp_validate(
     sentinel_context: Any,
     explicit_proxy: str | None,
 ) -> Any:
+    from new_protocol_register.protocol_browser_session import BrowserDocumentChallenge
+
     sentinel_header = _get_sentinel_header_for_signup(
         session,
         device_id=device_id,
@@ -240,15 +273,181 @@ def _submit_email_otp_validate(
     cookie_header = _deduped_cookie_header_for_request(session, EMAIL_OTP_VALIDATE_URL)
     if cookie_header:
         headers["cookie"] = cookie_header
-    return _session_request(
-        session,
-        "POST",
-        EMAIL_OTP_VALIDATE_URL,
-        explicit_proxy=explicit_proxy,
-        request_label="platform-email-otp-validate",
-        headers=headers,
-        json={"code": code},
+    try:
+        response = _session_request(
+            session,
+            "POST",
+            EMAIL_OTP_VALIDATE_URL,
+            explicit_proxy=explicit_proxy,
+            request_label="platform-email-otp-validate",
+            headers=headers,
+            json={"code": code},
+        )
+    except BrowserDocumentChallenge as error:
+        raise ProtocolRuntimeError(
+            "browser_verification_required browser_document_challenged",
+            stage="stage_otp_validate",
+            detail="email_otp_validate",
+            category="blocked",
+        ) from error
+    # A confirmed challenge is terminal; never replay the OTP in another browser.
+    _raise_if_browser_verification_required(
+        response, stage="stage_otp_validate", detail="email_otp_validate",
     )
+    return response
+
+
+def _recover_platform_otp_validate_in_browser(
+    *, session: requests.Session, code: str, headers: dict[str, str], explicit_proxy: str | None,
+) -> requests.Response | None:
+    """Retry a challenged OTP once in the browser with the same signed session."""
+    from protocol_runtime import protocol_register as browser_runtime
+    from new_protocol_register.protocol_browser_session import BrowserLoginSession
+
+    username = _decode_current_auth_session_payload(session).get("username")
+    expected_email = str(username.get("value") or "").strip() if isinstance(username, dict) else ""
+    if not expected_email:
+        print("[protocol-small-success] browser otp recovery rejected reason=missing_identity", flush=True)
+        return None
+    cookies = []
+    for cookie in session.cookies.jar:
+        # Edge cookies are client-bound; preserve the signed account session.
+        if (
+            cookie.domain.lstrip(".") not in {"openai.com", "auth.openai.com"}
+            or cookie.name == "cf_clearance" or cookie.name.startswith(("_cf", "__cf"))
+        ):
+            continue
+        item = {
+            "name": cookie.name, "value": cookie.value, "domain": cookie.domain,
+            "path": cookie.path or "/", "secure": cookie.secure,
+            "httpOnly": cookie.has_nonstandard_attr("HttpOnly"),
+        }
+        if cookie.expires is not None and cookie.expires > 0:
+            item["expires"] = cookie.expires
+        cookies.append(item)
+    diagnostic_dir = None
+    diagnostic_root = str(os.environ.get("PROTOCOL_BROWSER_OTP_DIAGNOSTICS_DIR") or "").strip()
+    if diagnostic_root:
+        root = Path(diagnostic_root).resolve()
+        if root.is_relative_to(Path("/shared/register-output")):
+            diagnostic_dir = root / str(uuid.uuid4())
+            diagnostic_dir.mkdir(mode=0o700, parents=True)
+            with (diagnostic_dir / "private-input.json").open("x", encoding="utf-8") as stream:
+                json.dump({"cookies": cookies, "code": code, "headers": headers, "proxy": explicit_proxy}, stream)
+    with contextlib.ExitStack() as cleanup:
+        profile_dir = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="platform-otp-browser-"))
+        driver = None
+        proxy_dir = None
+        try:
+            with _temporary_env_value("BROWSER_USER_DATA_DIR", profile_dir):
+                driver, proxy_dir = browser_runtime._load_protocol_browser_new_driver()(
+                    explicit_proxy, browser_backend="custom",
+                )
+            driver.set_page_load_timeout(30)
+            driver.set_script_timeout(25)
+            driver.execute_cdp_cmd("Network.setCookies", {"cookies": cookies})
+            driver.get(EMAIL_VERIFICATION_REFERER)
+            page = SimpleNamespace(
+                status_code=driver.execute_script("return performance.getEntriesByType('navigation')[0]?.responseStatus || 0"),
+                url=str(driver.current_url or ""), text=str(driver.page_source or ""), headers={},
+            )
+            browser_cookies = driver.get_cookies()
+            auth_cookie = next((c.get("value") for c in browser_cookies if c.get("name") == "oai-client-auth-session"), None)
+            minimized = next((c.get("value") for c in browser_cookies if c.get("name") == "auth-session-minimized"), "")
+            auth_payload = _decode_cookie_payload(auth_cookie)
+            if (
+                not auth_payload and page.status_code == 200 and page.url == EMAIL_VERIFICATION_REFERER
+                and decode_minimized_session(minimized, client_id=_PLATFORM_AUTH0_CLIENT_ID)
+            ):
+                deadline = time.monotonic() + 10
+                while True:
+                    browser_payload = driver.execute_script(
+                        "return window.__reactRouterContext?.state?.loaderData?."
+                        "['routes/layouts/client-auth-session-layout/layout']?.session || null"
+                    )
+                    if str(driver.current_url or "") != page.url:
+                        return None
+                    if isinstance(browser_payload, dict) or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.2)
+                auth_payload = bind_browser_auth_session(
+                    minimized, browser_payload, email=expected_email, client_id=_PLATFORM_AUTH0_CLIENT_ID,
+                )
+            identity_matches = _platform_authorize_account_page_type(
+                response=page, auth_session_payload=auth_payload, email=expected_email,
+            ) == "email_otp_verification"
+            if diagnostic_dir is not None:
+                with (diagnostic_dir / "private-navigation.json").open("x", encoding="utf-8") as stream:
+                    json.dump({"status": page.status_code, "url": page.url, "body": page.text, "cookies": browser_cookies}, stream)
+            print(
+                "[protocol-small-success] browser otp navigation "
+                f"status={page.status_code} expected_page={page.url == EMAIL_VERIFICATION_REFERER} "
+                f"identity_matches={identity_matches}", flush=True,
+            )
+            if (
+                page.status_code != 200 or page.url != EMAIL_VERIFICATION_REFERER
+                or not (
+                    any(c.get("name") == "login_session" and c.get("value") for c in browser_cookies)
+                    or decode_minimized_session(minimized, client_id=_PLATFORM_AUTH0_CLIENT_ID)
+                )
+                or not identity_matches
+                or any(marker in page.text.lower() for marker in ("cf-chl-", "just a moment", "verify you are human", "sorry, you have been blocked"))
+            ):
+                return None
+            request_headers = {
+                key: value for key, value in headers.items()
+                if key.lower() not in {"cookie", "host", "content-length", "user-agent", "origin", "referer"}
+                and not key.lower().startswith("sec-")
+            }
+            observed = driver.execute_async_script("""
+                const args = arguments[0], done = arguments[arguments.length - 1];
+                fetch(args.url, {method: 'POST', credentials: 'include', redirect: 'error',
+                    headers: args.headers, body: JSON.stringify({code: args.code})})
+                .then(async response => done({status: response.status, url: response.url,
+                    headers: Object.fromEntries(response.headers), body: await response.text()}))
+                .catch(() => done({status: 0}));
+            """, {"url": EMAIL_OTP_VALIDATE_URL, "headers": request_headers, "code": code})
+            if diagnostic_dir is not None:
+                with (diagnostic_dir / "private-response.json").open("x", encoding="utf-8") as stream:
+                    json.dump(observed, stream)
+            if (
+                not isinstance(observed, dict) or not isinstance(observed.get("status"), int)
+                or not 100 <= observed["status"] <= 599 or observed.get("url") != EMAIL_OTP_VALIDATE_URL
+                or not isinstance(observed.get("body"), str) or not isinstance(observed.get("headers"), dict)
+            ):
+                print("[protocol-small-success] browser otp recovery rejected reason=unobserved_response", flush=True)
+                return None
+            response = requests.Response()
+            response.status_code = observed["status"]
+            response.url = observed["url"]
+            response.headers = observed["headers"]
+            response.content = observed["body"].encode("utf-8")
+            snapshot = driver.execute_cdp_cmd("Network.getAllCookies", {})
+            for cookie in snapshot.get("cookies", []):
+                name = str(cookie.get("name") or "")
+                if (
+                    str(cookie.get("domain") or "").lstrip(".") in {"openai.com", "auth.openai.com"}
+                    and name != "cf_clearance" and not name.startswith(("_cf", "__cf"))
+                ):
+                    session.cookies.set(cookie["name"], cookie["value"], domain=cookie["domain"], path=cookie.get("path", "/"), secure=cookie.get("secure", False))
+            if response.status_code == 200 and isinstance(session, BrowserLoginSession):
+                session.adopt_browser(driver, proxy=explicit_proxy, proxy_dir=proxy_dir, cleanup=cleanup)
+                driver = None
+                proxy_dir = None
+            print(f"[protocol-small-success] browser otp response status={response.status_code}", flush=True)
+            return response
+        except Exception as exc:
+            print(f"[protocol-small-success] browser otp recovery failed exception_type={type(exc).__name__}", flush=True)
+            return None
+        finally:
+            if driver is not None:
+                with contextlib.suppress(Exception):
+                    driver.quit()
+            if proxy_dir:
+                cleanup_path = Path(proxy_dir).resolve()
+                temporary_root = Path(tempfile.gettempdir()).resolve()
+                if cleanup_path != temporary_root and cleanup_path.is_relative_to(temporary_root):
+                    shutil.rmtree(cleanup_path, ignore_errors=True)
 
 
 def _submit_create_account(
@@ -284,7 +483,19 @@ def _submit_create_account(
     )
 
 
+def _raise_if_browser_verification_required(response: Any, *, stage: str, detail: str) -> None:
+    if _response_header(response, "cf-mitigated").strip().lower() == "challenge":
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        raise ProtocolRuntimeError(
+            f"browser_verification_required status={status_code} cf_mitigated=challenge",
+            stage=stage,
+            detail=detail,
+            category="blocked",
+        )
+
+
 def _raise_if_unexpected_http(response: Any, *, expected_statuses: set[int], stage: str, detail: str) -> None:
+    _raise_if_browser_verification_required(response, stage=stage, detail=detail)
     status_code = int(getattr(response, "status_code", 0) or 0)
     if status_code in expected_statuses:
         return
@@ -294,6 +505,22 @@ def _raise_if_unexpected_http(response: Any, *, expected_statuses: set[int], sta
         detail=detail,
         category="flow_error",
     )
+
+
+def _validate_platform_authorize_response(*, session: requests.Session, response: Any) -> None:
+    _raise_if_unexpected_http(
+        response,
+        expected_statuses={200, 302},
+        stage="stage_auth_continue",
+        detail="oauth_authorize",
+    )
+    if not _login_session_cookie(session):
+        raise ProtocolRuntimeError(
+            "authorize_init_missing_login_session",
+            stage="stage_auth_continue",
+            detail="oauth_authorize",
+            category="auth_error",
+        )
 
 
 def _urlsafe_b64_no_padding(raw: bytes) -> str:
@@ -343,6 +570,9 @@ def _decode_cookie_payload(cookie_value: str | None) -> dict[str, Any]:
     token = str(cookie_value or "").strip()
     if not token:
         return {}
+    # Signed auth cookies append timestamp and signature to the JSON segment.
+    # This reads state metadata; the full cookie still goes to the server unchanged.
+    token = token.split(".", 1)[0]
     try:
         padded = token + ("=" * (-len(token) % 4))
         payload = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
@@ -353,13 +583,22 @@ def _decode_cookie_payload(cookie_value: str | None) -> dict[str, Any]:
 
 
 def _decode_current_auth_session_payload(session: requests.Session) -> dict[str, Any]:
-    return _decode_cookie_payload(
+    payload = _decode_cookie_payload(
         _get_session_cookie(
             session,
             "oai-client-auth-session",
             preferred_domains=(".openai.com", "auth.openai.com"),
         )
     )
+    if payload:
+        return payload
+    cached = getattr(session, "_browser_verified_auth_session", None)
+    cookie = _get_session_cookie(session, "auth-session-minimized", preferred_domains=(".openai.com", "auth.openai.com"))
+    if isinstance(cached, dict) and cookie and cached.get("cookie") == cookie:
+        payload = cached.get("payload")
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
 
 
 def _submit_authorize_continue_login_or_signup(
@@ -478,16 +717,20 @@ def _response_target_url(response: Any) -> str:
 
 
 def _login_session_cookie(session: requests.Session) -> str:
-    return _get_session_cookie(
+    legacy = _get_session_cookie(
         session,
         "login_session",
         preferred_domains=(".openai.com", "auth.openai.com"),
     )
+    if legacy:
+        return legacy
+    minimized = _get_session_cookie(session, "auth-session-minimized", preferred_domains=(".openai.com", "auth.openai.com"))
+    return minimized if decode_minimized_session(minimized, client_id=_PLATFORM_AUTH0_CLIENT_ID) else ""
 
 
 def _openai_login_init_error_is_retryable(exc: BaseException) -> bool:
     text = str(exc or "").strip().lower()
-    if not text:
+    if not text or "browser_verification_required" in text:
         return False
     return any(
         marker in text
@@ -505,10 +748,16 @@ def _openai_login_init_response_needs_retry(response: Any) -> bool:
         status_code = int(getattr(response, "status_code", 0) or 0)
     except Exception:
         status_code = 0
+    error_code = _response_error_code(response).lower()
     return bool(
-        status_code == 403
+        status_code in {403, 429}
         or _response_has_cloudflare_challenge(response)
-        or _response_error_code(response).lower() == "invalid_state"
+        or error_code
+        in {
+            "invalid_state",
+            "authorize_continue_blocked",
+            "authorize_continue_rate_limited",
+        }
     )
 
 
@@ -526,6 +775,55 @@ def _prime_openai_login_session_with_browser(
         reason=reason,
     )
     return updated_context, browser_result is not None
+
+
+def _open_platform_login_with_browser_retry(
+    *,
+    session: requests.Session,
+    sentinel_context: Any,
+    explicit_proxy: str | None,
+) -> tuple[Any, Any]:
+    """Warm the optional landing page, with browser recovery for transient errors.
+
+    The full small-success flow used to call ``_open_platform_login`` directly,
+    unlike the seed/login-init path. A transient 403 therefore terminated the
+    flow before the existing browser recovery path could refresh cookies and
+    challenge state.
+    """
+
+    try:
+        response = _open_optional_platform_login(session=session, explicit_proxy=explicit_proxy)
+        return sentinel_context, response
+    except ProtocolRuntimeError as exc:
+        if not _openai_login_init_error_is_retryable(exc):
+            raise
+        with (
+            _temporary_env_value(PROTOCOL_ENABLE_BROWSER_BOOTSTRAP_FALLBACK_ENV, "1"),
+            _temporary_env_value(PROTOCOL_ENABLE_BROWSER_SENTINEL_ENV, "1"),
+            _temporary_env_value(PROTOCOL_ENABLE_BROWSER_STAGE2_HANDOFF_ENV, "1"),
+        ):
+            sentinel_context, bootstrapped = _prime_openai_login_session_with_browser(
+                session=session,
+                sentinel_context=sentinel_context,
+                explicit_proxy=explicit_proxy,
+                reason="openai_login_platform_login_retry",
+            )
+        if not bootstrapped:
+            raise
+        try:
+            response = _open_optional_platform_login(session=session, explicit_proxy=explicit_proxy)
+        except ProtocolRuntimeError as retry_exc:
+            if not _openai_login_init_error_is_retryable(retry_exc):
+                raise
+            # Retain the browser state, but leave the authoritative auth entry
+            # responsible for validating the session.
+            print(
+                "[protocol-small-success] platform login remained blocked "
+                "after browser bootstrap; continuing with browser session",
+                flush=True,
+            )
+            response = None
+        return sentinel_context, response
 
 
 def _openai_login_init_entry_with_retry(
@@ -608,6 +906,254 @@ def _openai_login_init_entry_with_retry(
     return sentinel_context, response
 
 
+def _platform_authorize_browser_rejection_summary(
+    *, status: object, current_url: str, body: str,
+) -> dict[str, object]:
+    """Explain a rejected document without logging URLs, identifiers, or cookies."""
+    current = urllib.parse.urlsplit(current_url)
+    trusted_origin = current.scheme == "https" and current.netloc == "auth.openai.com"
+    page = {
+        "/log-in-or-create-account": "email_entry",
+        "/log-in": "email_entry",
+        "/login": "email_entry",
+        "/create-account/password": "signup_password",
+        "/email-verification": "email_verification",
+    }.get(current.path, "other") if trusted_origin else "other"
+    challenge = any(marker in body.lower() for marker in (
+        "cf-chl-", "just a moment", "verify you are human",
+        "sorry, you have been blocked", "attention required! | cloudflare",
+    ))
+    if challenge:
+        reason = "challenge_page"
+    elif status in (0, None):
+        reason = "navigation_status_unavailable"
+    elif status != 200:
+        reason = "unexpected_http_status"
+    elif not trusted_origin:
+        reason = "unexpected_origin"
+    elif page == "email_entry":
+        reason = "email_entry_requires_interaction"
+    elif page == "other":
+        reason = "unexpected_page"
+    else:
+        reason = "missing_auth_cookie"
+    return {
+        "reason": reason,
+        "status": int(status) if isinstance(status, (int, float)) and 0 <= status <= 599 else 0,
+        "page": page,
+        "challenge": challenge,
+    }
+
+def _recover_platform_auth0_authorize_in_browser(
+    *,
+    session: requests.Session,
+    auth_url: str,
+    device_id: str,
+    sentinel_context: Any,
+    explicit_proxy: str | None,
+) -> tuple[Any, Any | None, str, str]:
+    """Use an observed browser response, retaining the exact OAuth transaction."""
+
+    from protocol_runtime import protocol_register as browser_runtime
+    from new_protocol_register.protocol_browser_session import BrowserLoginSession
+
+    expected_email = urllib.parse.parse_qs(urllib.parse.urlsplit(auth_url).query).get("login_hint", [""])[0]
+    if not expected_email:
+        return sentinel_context, None, auth_url, device_id
+    with contextlib.ExitStack() as cleanup:
+        profile_dir = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="platform-authorize-browser-"))
+        driver = None
+        proxy_dir = None
+        try:
+            with _temporary_env_value("BROWSER_USER_DATA_DIR", profile_dir):
+                driver, proxy_dir = browser_runtime._load_protocol_browser_new_driver()(
+                    explicit_proxy, browser_backend="custom",
+                )
+            driver.set_page_load_timeout(30)
+            seeded = driver.execute_cdp_cmd("Network.setCookie", {
+                "name": "oai-did", "value": device_id,
+                "domain": ".openai.com", "path": "/", "secure": True,
+            })
+            if not isinstance(seeded, dict) or seeded.get("success") is not True:
+                return sentinel_context, None, auth_url, device_id
+            driver.get(auth_url)
+            current_url = str(driver.current_url or "")
+            current = urllib.parse.urlsplit(current_url)
+            status = driver.execute_script(
+                "return performance.getEntriesByType('navigation')[0]?.responseStatus || 0"
+            )
+            body = str(driver.page_source or "")
+            if (
+                status != 200 or current.scheme != "https" or current.netloc != "auth.openai.com"
+                or current.path not in {"/create-account/password", "/email-verification"}
+                or any(marker in body.lower() for marker in (
+                    "cf-chl-", "just a moment", "verify you are human",
+                    "sorry, you have been blocked", "attention required! | cloudflare",
+                ))
+                or not any(
+                    cookie.get("name") == "login_session" and cookie.get("value")
+                    or cookie.get("name") == "auth-session-minimized" and decode_minimized_session(
+                        cookie.get("value", ""), client_id=_PLATFORM_AUTH0_CLIENT_ID,
+                    )
+                    for cookie in driver.get_cookies()
+                )
+            ):
+                print(
+                    "[protocol-small-success] browser authorize has no verified account page "
+                    + json.dumps(_platform_authorize_browser_rejection_summary(
+                        status=status, current_url=current_url, body=body,
+                    ), sort_keys=True),
+                    flush=True,
+                )
+                return sentinel_context, None, auth_url, device_id
+            # Keep the verified document and its loader state for identity binding.
+            _import_browser_driver_cookies_into_session(session, driver=driver, navigate=False)
+            if not _decode_current_auth_session_payload(session):
+                minimized = _get_session_cookie(session, "auth-session-minimized", preferred_domains=(".openai.com", "auth.openai.com"))
+                # Navigation can finish before React Router hydrates its session.
+                deadline = time.monotonic() + 10
+                while True:
+                    browser_payload = driver.execute_script(
+                        "return window.__reactRouterContext?.state?.loaderData?."
+                        "['routes/layouts/client-auth-session-layout/layout']?.session || null"
+                    )
+                    if str(driver.current_url or "") != current_url:
+                        return sentinel_context, None, auth_url, device_id
+                    if isinstance(browser_payload, dict) or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.2)
+                verified = bind_browser_auth_session(
+                    minimized, payload=browser_payload, email=expected_email, client_id=_PLATFORM_AUTH0_CLIENT_ID,
+                )
+                if verified:
+                    session._browser_verified_auth_session = {"cookie": minimized, "payload": verified}
+            response = SimpleNamespace(status_code=status, headers={}, text=body, url=current_url)
+            if not _platform_authorize_account_page_type(
+                response=response, auth_session_payload=_decode_current_auth_session_payload(session),
+                email=expected_email,
+            ) or not _login_session_cookie(session):
+                print("[protocol-small-success] browser authorize identity not verified", flush=True)
+                return sentinel_context, None, auth_url, device_id
+            user_agent = str(driver.execute_script("return navigator.userAgent") or "")
+            updated_context = _clone_protocol_sentinel_context(
+                sentinel_context, device_id=device_id, user_agent=user_agent,
+            )
+            session.headers.update({"user-agent": user_agent})
+            if isinstance(session, BrowserLoginSession):
+                session.adopt_browser(driver, proxy=explicit_proxy, proxy_dir=proxy_dir, cleanup=cleanup)
+                driver = None
+                proxy_dir = None
+            print(
+                "[protocol-small-success] browser authorize verified "
+                f"status={status} path={current.path} identity_matches=yes",
+                flush=True,
+            )
+            return updated_context, response, auth_url, device_id
+        except Exception as exc:
+            print(
+                "[protocol-small-success] browser authorize recovery failed "
+                f"exception_type={type(exc).__name__}", flush=True,
+            )
+            return sentinel_context, None, auth_url, device_id
+        finally:
+            if driver is not None:
+                with contextlib.suppress(Exception):
+                    driver.quit()
+            if proxy_dir:
+                cleanup_path = Path(proxy_dir).resolve()
+                temporary_root = Path(tempfile.gettempdir()).resolve()
+                if cleanup_path != temporary_root and cleanup_path.is_relative_to(temporary_root):
+                    shutil.rmtree(cleanup_path, ignore_errors=True)
+
+
+def _platform_authorize_account_page_type(
+    *, response: object, auth_session_payload: dict[str, object], email: str,
+) -> str:
+    username = auth_session_payload.get("username")
+    if (
+        not isinstance(username, dict)
+        or str(username.get("value") or "").strip().lower() != str(email).strip().lower()
+        or auth_session_payload.get("original_screen_hint") != "login_or_signup"
+    ):
+        return ""
+    current = urllib.parse.urlsplit(_response_target_url(response))
+    if current.scheme != "https" or current.netloc != "auth.openai.com":
+        return ""
+    return {
+        "/create-account/password": "create_account_password",
+        "/email-verification": "email_otp_verification",
+    }.get(current.path, "")
+
+
+def _platform_auth0_authorize_with_browser_retry(
+    *,
+    session: requests.Session,
+    auth_url: str,
+    device_id: str,
+    sentinel_context: Any,
+    explicit_proxy: str | None,
+    request_label: str,
+) -> tuple[Any, Any, str, str]:
+    """Open authorize, optionally observing the same OAuth transaction in a browser."""
+
+    def _request(url: str) -> Any:
+        return _session_request(
+            session,
+            "GET",
+            url,
+            explicit_proxy=explicit_proxy,
+            request_label=request_label,
+            timeout=20,
+            headers={
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "accept-language": _PLATFORM_AUTH0_ACCEPT_LANGUAGE,
+                "upgrade-insecure-requests": "1",
+                "user-agent": DEFAULT_PROTOCOL_USER_AGENT,
+                "sec-ch-ua": _PLATFORM_AUTH0_SEC_CH_UA,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "same-site",
+            },
+        )
+
+    response = _request(auth_url)
+    if not env_flag("PROTOCOL_ENABLE_BROWSER_AUTHORIZE_FALLBACK", False):
+        _raise_if_browser_verification_required(response, stage="stage_auth_continue", detail="oauth_authorize")
+    if not (
+        _openai_login_init_response_needs_retry(response)
+        or not _login_session_cookie(session)
+    ):
+        return sentinel_context, response, auth_url, device_id
+
+    print(
+        "[protocol-small-success] platform Auth0 authorize response needs browser retry "
+        f"status={getattr(response, 'status_code', 0)} "
+        f"challenge={'yes' if _response_has_cloudflare_challenge(response) else 'no'}",
+        flush=True,
+    )
+    # Keep the original response unless one browser verifies the exact transaction.
+    (
+        sentinel_context,
+        browser_response,
+        refreshed_auth_url,
+        refreshed_device_id,
+    ) = _recover_platform_auth0_authorize_in_browser(
+        session=session,
+        auth_url=auth_url,
+        device_id=device_id,
+        sentinel_context=sentinel_context,
+        explicit_proxy=explicit_proxy,
+    )
+    if browser_response is not None:
+        _validate_platform_authorize_response(session=session, response=browser_response)
+        return sentinel_context, browser_response, refreshed_auth_url, refreshed_device_id
+
+    _raise_if_browser_verification_required(response, stage="stage_auth_continue", detail="oauth_authorize")
+    return sentinel_context, response, auth_url, device_id
+
+
 def _ensure_openai_login_session_ready(
     *,
     session: requests.Session,
@@ -644,21 +1190,28 @@ def _ensure_openai_login_session_ready(
     return sentinel_context
 
 
-def _submit_openai_login_init_authorize_continue_with_retry(
+def _submit_authorize_continue_with_browser_retry(
     *,
     session: requests.Session,
     email: str,
     device_id: str,
     sentinel_context: Any,
     explicit_proxy: str | None,
+    use_create_account_referer: bool,
 ) -> tuple[Any, Any]:
-    response = _submit_authorize_continue_login_or_create_account(
+    submit_authorize_continue = (
+        _submit_authorize_continue_login_or_signup
+        if use_create_account_referer
+        else _submit_authorize_continue_login_or_create_account
+    )
+    response = submit_authorize_continue(
         session=session,
         email=email,
         device_id=device_id,
         sentinel_context=sentinel_context,
         explicit_proxy=explicit_proxy,
     )
+    _raise_if_browser_verification_required(response, stage="stage_auth_continue", detail="authorize_continue")
     print(
         "[protocol-small-success] openai login init authorize continue "
         f"status={getattr(response, 'status_code', 0)} "
@@ -667,7 +1220,7 @@ def _submit_openai_login_init_authorize_continue_with_retry(
         f"challenge={'yes' if _response_has_cloudflare_challenge(response) else 'no'}",
         flush=True,
     )
-    if _openai_login_init_response_needs_retry(response):
+    if bounded_attempts(2) > 1 and _openai_login_init_response_needs_retry(response):
         sentinel_context, bootstrapped = _prime_openai_login_session_with_browser(
             session=session,
             sentinel_context=sentinel_context,
@@ -687,7 +1240,7 @@ def _submit_openai_login_init_authorize_continue_with_retry(
                 explicit_proxy=explicit_proxy,
                 stage_detail="openai_login_init_authorize_continue",
             )
-            response = _submit_authorize_continue_login_or_create_account(
+            response = submit_authorize_continue(
                 session=session,
                 email=email,
                 device_id=device_id,
@@ -754,7 +1307,11 @@ def _build_signup_sentinel_candidates(
         ("with_email", email),
         ("without_email", None),
     ]
+    candidate_limit = bounded_attempts(len(persona_values) * len(email_modes))
+    candidates_tried = 0
     for persona_label, persona_value in persona_values:
+        if candidates_tried >= candidate_limit:
+            break
         with _temporary_env_value("PROTOCOL_SENTINEL_PERSONA", persona_value):
             candidate_context = sentinel_context
             if persona_label != "current":
@@ -764,6 +1321,9 @@ def _build_signup_sentinel_candidates(
                     user_agent=str(getattr(sentinel_context, "user_agent", "") or DEFAULT_PROTOCOL_USER_AGENT),
                 )
             for email_mode_label, browser_email in email_modes:
+                if candidates_tried >= candidate_limit:
+                    break
+                candidates_tried += 1
                 try:
                     token = _get_sentinel_header_for_signup(
                         session,
@@ -1066,12 +1626,13 @@ def run_protocol_openai_login_init_from_path(
                                 stage_detail="openai_login_init_entry",
                             )
 
-                            sentinel_context, login_response = _submit_openai_login_init_authorize_continue_with_retry(
+                            sentinel_context, login_response = _submit_authorize_continue_with_browser_retry(
                                 session=session,
                                 email=mailbox.email,
                                 device_id=device_id,
                                 sentinel_context=sentinel_context,
                                 explicit_proxy=normalized_proxy,
+                                use_create_account_referer=False,
                             )
                             page_type = str(_extract_page_type(login_response) or "").strip()
                             if _response_has_phone_wall(login_response):
@@ -1221,6 +1782,86 @@ def _cookie_header_excluding_names(cookie_header: str | None, *excluded_names: s
     return "; ".join(parts)
 
 
+def _prepare_passwordless_email_otp(
+    *,
+    session: requests.Session,
+    page_type: str,
+    explicit_proxy: str | None,
+    sentinel_context: Any,
+) -> bool:
+    normalized_page_type = str(page_type or "").strip()
+    if normalized_page_type not in ("email_otp_send", "email_otp_verification"):
+        return False
+    if normalized_page_type == "email_otp_send":
+        _send_email_otp(
+            session,
+            explicit_proxy=explicit_proxy,
+            header_builder=sentinel_context,
+        )
+    else:
+        print(
+            "[protocol-small-success] email OTP verification page returned; "
+            "waiting for the initial code before considering one resend",
+            flush=True,
+        )
+    return True
+
+
+def _resend_passwordless_email_otp(
+    *,
+    session: requests.Session,
+    explicit_proxy: str | None,
+    sentinel_context: Any,
+    remaining_seconds: int,
+) -> bool:
+    if not env_flag(PROTOCOL_ENABLE_EMAIL_OTP_SEND_ENV, True) or remaining_seconds < 10:
+        return False
+    print("[protocol-small-success] requesting email OTP after an empty-inbox grace period", flush=True)
+    try:
+        response = _session_request(
+            session,
+            "GET",
+            EMAIL_OTP_SEND_URL,
+            explicit_proxy=explicit_proxy,
+            request_label="passwordless-email-otp-resend",
+            allow_transport_fallback=False,
+            timeout=min(30, max(1, remaining_seconds // 2)),
+            headers=_build_protocol_headers(
+                request_kind="email-otp-send",
+                referer=EMAIL_VERIFICATION_REFERER,
+                content_type=None,
+                sentinel_context=sentinel_context,
+            ),
+        )
+        try:
+            response_payload = response.json()
+        except Exception:
+            response_payload = None
+        response_path = urllib.parse.urlsplit(str(getattr(response, "url", "") or "")).path
+        content_type = str((getattr(response, "headers", None) or {}).get("content-type", "")).split(";", 1)[0]
+        page_type = _extract_page_type(response)
+        history = getattr(response, "history", None) or []
+        print(json.dumps({
+            "event": "protocol_email_otp_resend_response",
+            "status": response.status_code,
+            "contentType": content_type if content_type in ("application/json", "text/html") else "other",
+            "pageType": page_type if page_type in ("email_otp_verification", "email_otp_send", "login_password", "create_account_password") else "other",
+            "responsePath": response_path if response_path in ("/api/accounts/email-otp/send", "/email-verification") else "other",
+            "redirectStatuses": [item.status_code for item in history[:5]],
+            "jsonObject": isinstance(response_payload, dict),
+            "errorPresent": isinstance(response_payload, dict) and bool(response_payload.get("error")),
+        }), flush=True)
+        _raise_if_unexpected_http(
+            response, expected_statuses=set(range(200, 300)),
+            stage="stage_otp_send", detail="email_otp_resend",
+        )
+    except ProtocolRuntimeError:
+        raise
+    except Exception as error:
+        raise _wrap_protocol_error(error, stage="stage_otp_send", detail="email_otp_resend") from error
+    return True
+
+
 def _submit_user_register_protocol(
     *,
     session: requests.Session,
@@ -1266,6 +1907,7 @@ def _submit_user_register_protocol(
         for name, variant_cookie_header, variant_passkey_header in request_variants
     }
 
+    ordered_attempts = ordered_attempts[:bounded_attempts(max(1, len(ordered_attempts)))]
     for candidate_index, (sentinel_label, sentinel_header, cookie_header, passkey_header) in enumerate(ordered_attempts, start=1):
         t_len, p_len, has_c = _sentinel_token_lengths(sentinel_header)
         variant_name = variant_name_by_headers.get((cookie_header, passkey_header), "unknown")
@@ -1333,6 +1975,8 @@ def _should_retry_after_user_register_error(exc: ProtocolRuntimeError, *, time_r
 
 
 def _should_retry_after_authorize_error(exc: ProtocolRuntimeError, *, time_remaining_seconds: int) -> bool:
+    if "browser_verification_required" in str(exc).lower():
+        return False
     if str(getattr(exc, "detail", "") or "").strip() != "oauth_authorize":
         return False
     if str(getattr(exc, "stage", "") or "").strip() != "stage_auth_continue":
@@ -1376,7 +2020,7 @@ def run_protocol_small_success_once(
     output_root = output_dir or DEFAULT_REGISTER_PROTOCOL_OUTPUT_DIR
     mailbox = None
     retain_mailbox = False
-    max_network_attempts = 1 if normalize_proxy_env_url(explicit_proxy) else 2
+    max_network_attempts = bounded_attempts(1 if normalize_proxy_env_url(explicit_proxy) else 2)
 
     def _remaining_flow_seconds(*, minimum_seconds: int = 1) -> int:
         remaining = int(flow_timeout_seconds - (time.monotonic() - flow_started_monotonic))
@@ -1433,7 +2077,14 @@ def run_protocol_small_success_once(
                         )
                         with flow_proxy_cm as flow_proxy:
                             explicit_proxy = task_explicit_proxy or normalize_proxy_env_url(flow_proxy.proxy_url) or None
-                            session = requests.Session(
+                            session_factory = requests.Session
+                            if env_flag("PROTOCOL_ENABLE_BROWSER_SIGNUP_SESSION", False):
+                                from functools import partial
+
+                                from new_protocol_register.protocol_browser_session import BrowserLoginSession
+
+                                session_factory = partial(BrowserLoginSession, recover_challenges=False)
+                            session = session_factory(
                                 impersonate=impersonate,
                                 timeout=30,
                                 verify=verify_tls,
@@ -1447,13 +2098,24 @@ def run_protocol_small_success_once(
                                 flush=True,
                             )
                             seed_device_cookie(session, device_id)
-                            _open_platform_login(session=session, explicit_proxy=explicit_proxy)
+                            sentinel_context = _new_protocol_sentinel_context(
+                                session,
+                                explicit_proxy=explicit_proxy,
+                                user_agent=DEFAULT_PROTOCOL_USER_AGENT,
+                            )
+                            sentinel_context, _ = _open_platform_login_with_browser_retry(
+                                session=session,
+                                sentinel_context=sentinel_context,
+                                explicit_proxy=explicit_proxy,
+                            )
+                            # Browser bootstrap may refresh the oai-did cookie;
+                            # keep all subsequent auth URLs and sentinel payloads
+                            # on the same device identity.
+                            device_id = str(
+                                getattr(sentinel_context, "device_id", "") or device_id
+                            ).strip() or device_id
                             sentinel_context = _clone_protocol_sentinel_context(
-                                _new_protocol_sentinel_context(
-                                    session,
-                                    explicit_proxy=explicit_proxy,
-                                    user_agent=DEFAULT_PROTOCOL_USER_AGENT,
-                                ),
+                                sentinel_context,
                                 device_id=device_id,
                             )
 
@@ -1478,44 +2140,26 @@ def run_protocol_small_success_once(
                             except Exception:
                                 pass
                             _remaining_flow_seconds()
-                            authorize_response = _session_request(
-                                session,
-                                "GET",
+                            (
+                                sentinel_context,
+                                authorize_response,
                                 auth_url,
+                                device_id,
+                            ) = _platform_auth0_authorize_with_browser_retry(
+                                session=session,
+                                auth_url=auth_url,
+                                device_id=device_id,
+                                sentinel_context=sentinel_context,
                                 explicit_proxy=explicit_proxy,
                                 request_label=f"protocol-small-success-authorize-{network_attempt}",
-                                timeout=20,
-                                headers={
-                                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                                    "accept-language": _PLATFORM_AUTH0_ACCEPT_LANGUAGE,
-                                    "upgrade-insecure-requests": "1",
-                                    "user-agent": DEFAULT_PROTOCOL_USER_AGENT,
-                                    "sec-ch-ua": _PLATFORM_AUTH0_SEC_CH_UA,
-                                    "sec-ch-ua-mobile": "?0",
-                                    "sec-ch-ua-platform": "\"Windows\"",
-                                    "sec-fetch-dest": "document",
-                                    "sec-fetch-mode": "navigate",
-                                    "sec-fetch-site": "same-site",
-                                },
                             )
-                            login_session = _get_session_cookie(
-                                session,
-                                "login_session",
-                                preferred_domains=(".openai.com", "auth.openai.com"),
-                            )
-                            if not login_session:
-                                raise ProtocolRuntimeError(
-                                    "authorize_init_missing_login_session",
-                                    stage="stage_auth_continue",
-                                    detail="oauth_authorize",
-                                    category="auth_error",
-                                )
-                            _raise_if_unexpected_http(
-                                authorize_response,
-                                expected_statuses={200, 302},
-                                stage="stage_auth_continue",
-                                detail="oauth_authorize",
-                            )
+                            platform_auth_context["url"] = auth_url
+                            platform_auth_context["deviceId"] = device_id
+                            try:
+                                setattr(session, "_new_protocol_signup_oauth_auth_url", auth_url)
+                            except Exception:
+                                pass
+                            _validate_platform_authorize_response(session=session, response=authorize_response)
 
                             auth_session_payload = _decode_current_auth_session_payload(session)
                             auth_username = ""
@@ -1524,12 +2168,11 @@ def run_protocol_small_success_once(
                                 auth_username = str(auth_username_value.get("value") or "").strip().lower()
                             original_screen_hint = str(auth_session_payload.get("original_screen_hint") or "").strip()
                             authorize_target_url = _response_target_url(authorize_response)
-                            reached_password_page = "create-account/password" in str(authorize_target_url or "").lower()
-                            auth_state_matches_browser = (
-                                reached_password_page
-                                and original_screen_hint == "login_or_signup"
-                                and auth_username == str(mailbox.email or "").strip().lower()
+                            account_page_type = _platform_authorize_account_page_type(
+                                response=authorize_response, auth_session_payload=auth_session_payload,
+                                email=mailbox.email,
                             )
+                            auth_state_matches_browser = bool(account_page_type)
                             print(
                                 "[protocol-small-success] auth session after authorize "
                                 f"email={mailbox.email} target_url={authorize_target_url} "
@@ -1542,15 +2185,18 @@ def run_protocol_small_success_once(
 
                             signup_response = authorize_response
                             if not auth_state_matches_browser:
-                                signup_response = _submit_authorize_continue_login_or_signup(
+                                sentinel_context, signup_response = _submit_authorize_continue_with_browser_retry(
                                     session=session,
                                     email=mailbox.email,
                                     device_id=device_id,
                                     sentinel_context=sentinel_context,
                                     explicit_proxy=explicit_proxy,
+                                    use_create_account_referer=True,
                                 )
                             _remaining_flow_seconds()
-                            signup_page_type = _extract_page_type(signup_response)
+                            signup_page_type = _extract_page_type(signup_response) or (
+                                account_page_type if auth_state_matches_browser else ""
+                            )
                             if _response_has_phone_wall(signup_response):
                                 retain_mailbox = True
                                 surface, final_url = _classify_protocol_small_success(
@@ -1586,28 +2232,35 @@ def run_protocol_small_success_once(
                                 stage="stage_auth_continue",
                                 detail="authorize_continue",
                             )
-                            if signup_page_type in ("email_otp_send", "email_otp_verification"):
-                                raise ProtocolRuntimeError(
-                                    f"existing_account_detected page_type={signup_page_type}",
-                                    stage="stage_create_account",
-                                    detail="authorize_continue_existing_account",
-                                    category="flow_error",
-                                )
-
-                            register_response, winning_user_register_attempt = _submit_user_register_protocol(
+                            passwordless_email_otp = _prepare_passwordless_email_otp(
                                 session=session,
-                                email=mailbox.email,
-                                password=password,
-                                device_id=device_id,
-                                sentinel_context=sentinel_context,
+                                page_type=signup_page_type,
                                 explicit_proxy=explicit_proxy,
-                                network_attempt=network_attempt,
-                                attempt_history=user_register_attempt_history,
+                                sentinel_context=sentinel_context,
                             )
+                            if passwordless_email_otp:
+                                register_response = signup_response
+                                winning_user_register_attempt = None
+                            else:
+                                register_response, winning_user_register_attempt = _submit_user_register_protocol(
+                                    session=session,
+                                    email=mailbox.email,
+                                    password=password,
+                                    device_id=device_id,
+                                    sentinel_context=sentinel_context,
+                                    explicit_proxy=explicit_proxy,
+                                    network_attempt=network_attempt,
+                                    attempt_history=user_register_attempt_history,
+                                )
                             _remaining_flow_seconds()
                             register_page_type = _extract_page_type(register_response)
+                            register_response_source = (
+                                "authorize_continue_email_otp"
+                                if passwordless_email_otp
+                                else "user_register"
+                            )
                             print(
-                                "[protocol-small-success] user_register response "
+                                f"[protocol-small-success] {register_response_source} response "
                                 f"email={mailbox.email} page_type={register_page_type or '<none>'} "
                                 f"final_url={_response_target_url(register_response)} "
                                 f"network_attempt={network_attempt}",
@@ -1653,21 +2306,22 @@ def run_protocol_small_success_once(
                                 register_response,
                                 expected_statuses={200},
                                 stage="stage_create_account",
-                                detail="user_register",
+                                detail=register_response_source,
                             )
 
-                            try:
-                                _send_email_otp(
-                                    session,
-                                    explicit_proxy=explicit_proxy,
-                                    header_builder=sentinel_context,
-                                )
-                            except Exception as exc:
-                                print(
-                                    "[protocol-small-success] email_otp send skipped "
-                                    f"email={mailbox.email} err={exc}",
-                                    flush=True,
-                                )
+                            if not passwordless_email_otp:
+                                try:
+                                    _send_email_otp(
+                                        session,
+                                        explicit_proxy=explicit_proxy,
+                                        header_builder=sentinel_context,
+                                    )
+                                except Exception as exc:
+                                    print(
+                                        "[protocol-small-success] email_otp send skipped "
+                                        f"email={mailbox.email} err={exc}",
+                                        flush=True,
+                                    )
 
                             code = wait_openai_code(
                                 mailbox_ref=mailbox.ref,
@@ -1676,6 +2330,12 @@ def run_protocol_small_success_once(
                                 mailcreate_custom_auth=MAILCREATE_CUSTOM_AUTH,
                                 timeout_seconds=max(1, _remaining_flow_seconds()),
                                 min_mail_id=otp_min_mail_id,
+                                resend_callback=(
+                                    lambda remaining: _resend_passwordless_email_otp(
+                                        session=session, explicit_proxy=explicit_proxy,
+                                        sentinel_context=sentinel_context, remaining_seconds=remaining,
+                                    )
+                                ) if passwordless_email_otp and signup_page_type == "email_otp_verification" else None,
                             )
                             _remaining_flow_seconds()
                             code = str(code or "").strip()

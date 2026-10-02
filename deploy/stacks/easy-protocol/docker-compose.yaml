@@ -1,10 +1,20 @@
+x-easy-logging: &easy-logging
+  driver: json-file
+  options:
+    max-size: "${EASY_DOCKER_LOG_MAX_SIZE:-20m}"
+    max-file: "${EASY_DOCKER_LOG_MAX_FILE:-5}"
+
 x-python-protocol-common: &python-protocol-common
   build:
     context: ../../..
     dockerfile: deploy/providers/python/Dockerfile
   image: easy-protocol/easy-protocol-python:local
   restart: unless-stopped
+  logging: *easy-logging
+  tmpfs:
+    - /tmp:size=512m,mode=1777
   environment:
+    PYTHONDONTWRITEBYTECODE: "1"
     PYTHONUNBUFFERED: "1"
     PYTHON_PROTOCOL_HOST: 0.0.0.0
     PYTHON_PROTOCOL_PORT: "9100"
@@ -46,6 +56,9 @@ services:
     image: easy-email/easy-email:local
     container_name: easy-email
     restart: unless-stopped
+    logging: *easy-logging
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     ports:
       - "18080:8080"
     env_file:
@@ -78,6 +91,9 @@ services:
     image: easy-proxy/easy-proxy:local
     container_name: easy-proxy
     restart: unless-stopped
+    logging: *easy-logging
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     ports:
       - "2323:2323"
       - "19888:29888"
@@ -107,6 +123,9 @@ services:
     image: easy-protocol/easy-protocol:local
     container_name: easy-protocol
     restart: unless-stopped
+    logging: *easy-logging
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     depends_on:
       - easy-protocol-python-001
     ports:

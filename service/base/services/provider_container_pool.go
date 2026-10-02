@@ -71,6 +71,11 @@ type providerContainerLease struct {
 	acquiredSvc string
 }
 
+const (
+	managedProviderLogMaxSize = "20m"
+	managedProviderLogMaxFile = "5"
+)
+
 type providerContainerDocker interface {
 	CreateContainer(ctx context.Context, name string, request dockerContainerCreateRequest) (string, error)
 	StartContainer(ctx context.Context, id string) error
@@ -517,6 +522,16 @@ func (p *providerContainerPool) spawnChild(ctx context.Context, family *provider
 		HostConfig: dockerContainerHostConfig{
 			Binds:       buildManagedProviderBinds(family.hostMounts),
 			NetworkMode: family.networkName,
+			LogConfig: dockerLogConfig{
+				Type: "json-file",
+				Config: map[string]string{
+					"max-size": managedProviderLogMaxSize,
+					"max-file": managedProviderLogMaxFile,
+				},
+			},
+			Tmpfs: map[string]string{
+				"/tmp": "rw,nosuid,nodev,size=512m,mode=1777",
+			},
 			RestartPolicy: dockerRestartPolicy{
 				Name: "unless-stopped",
 			},
@@ -757,14 +772,29 @@ func maxManagedReplicaIndex(index int) int {
 }
 
 func buildManagedProviderEnv(family *providerContainerFamily, serviceName string) []string {
-	keys := make([]string, 0, len(family.environment)+1)
-	for key := range family.environment {
+	environment := cloneManagedEnvironment(family.environment)
+	if strings.EqualFold(strings.TrimSpace(family.language), "python") {
+		defaults := map[string]string{
+			"HOME":                    "/tmp/easy-home",
+			"PYTHONDONTWRITEBYTECODE": "1",
+			"XDG_CACHE_HOME":          "/tmp/easy-cache",
+			"XDG_CONFIG_HOME":         "/tmp/easy-config",
+			"XDG_RUNTIME_DIR":         "/tmp/easy-runtime",
+		}
+		for key, value := range defaults {
+			if _, exists := environment[key]; !exists {
+				environment[key] = value
+			}
+		}
+	}
+	keys := make([]string, 0, len(environment)+1)
+	for key := range environment {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	env := make([]string, 0, len(keys)+1)
 	for _, key := range keys {
-		env = append(env, key+"="+family.environment[key])
+		env = append(env, key+"="+environment[key])
 	}
 	env = append(env, "EASY_PROTOCOL_CHILD_SERVICE_NAME="+serviceName)
 	return env
@@ -865,7 +895,14 @@ type dockerContainerHostConfig struct {
 	Binds         []string                       `json:"Binds,omitempty"`
 	NetworkMode   string                         `json:"NetworkMode,omitempty"`
 	PortBindings  map[string][]dockerPortBinding `json:"PortBindings,omitempty"`
+	LogConfig     dockerLogConfig                `json:"LogConfig,omitempty"`
+	Tmpfs         map[string]string              `json:"Tmpfs,omitempty"`
 	RestartPolicy dockerRestartPolicy            `json:"RestartPolicy,omitempty"`
+}
+
+type dockerLogConfig struct {
+	Type   string            `json:"Type,omitempty"`
+	Config map[string]string `json:"Config,omitempty"`
 }
 
 type dockerPortBinding struct {

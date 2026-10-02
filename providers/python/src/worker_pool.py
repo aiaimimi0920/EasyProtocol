@@ -18,6 +18,8 @@ _CURRENT_DIR = Path(__file__).resolve().parent
 if str(_CURRENT_DIR) not in sys.path:
     sys.path.append(str(_CURRENT_DIR))
 
+from protocol_runtime.errors import ProtocolRuntimeError
+
 
 def _dispatch_step(step_type: str, step_input: dict[str, Any]) -> dict[str, Any]:
     if str(step_type or "").strip() == "worker_runtime_probe":
@@ -89,6 +91,9 @@ def _worker_process_main(
                 }
             )
         except RuntimeError as exc:
+            details: dict[str, object] = {"step_type": step_type, "worker_id": worker_id}
+            if isinstance(exc, ProtocolRuntimeError):
+                details["protocol_error"] = exc.to_response_payload()
             result_queue.put(
                 {
                     "task_id": task_id,
@@ -97,10 +102,7 @@ def _worker_process_main(
                     "error": {
                         "category": "operation_error",
                         "message": str(exc),
-                        "details": {
-                            "step_type": step_type,
-                            "worker_id": worker_id,
-                        },
+                        "details": details,
                     },
                 }
             )

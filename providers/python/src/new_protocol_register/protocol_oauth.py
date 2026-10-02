@@ -33,7 +33,13 @@ else:
     from .others.runtime import flow_network_env, lease_flow_proxy, resolve_mailbox
     from .others.storage import load_json_payload, persist_first_phone_record, persist_success_auth_json
 
-from protocol_runtime.protocol_register import run_protocol_repair_once, temporary_workspace_selector_overrides
+from protocol_runtime.protocol_register import (
+    ProtocolRegistrationResult,
+    handoff_authenticated_chatgpt_session_to_codex,
+    restore_authenticated_session_from_context,
+    run_protocol_repair_once,
+    temporary_workspace_selector_overrides,
+)
 from shared_mailbox.easy_email_client import release_mailbox, release_mailbox_sessions_by_email
 
 
@@ -186,7 +192,7 @@ def _extract_account_id(auth_payload: dict[str, Any]) -> str:
 def _normalize_seed_payload(seed_payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(seed_payload, dict):
         raise RuntimeError("protocol_oauth_requires_seed_payload")
-    return {
+    normalized = {
         "email": str(seed_payload.get("email") or "").strip(),
         "password": str(seed_payload.get("password") or "").strip(),
         "mailbox_ref": str(
@@ -206,6 +212,56 @@ def _normalize_seed_payload(seed_payload: dict[str, Any]) -> dict[str, Any]:
         "birthdate": str(seed_payload.get("birthdate") or "").strip(),
         "created_at": str(seed_payload.get("createdAt") or seed_payload.get("created_at") or "").strip(),
     }
+    chatgpt_login = seed_payload.get("chatgptLogin") if isinstance(seed_payload.get("chatgptLogin"), dict) else {}
+    chatgpt_login_details = (
+        seed_payload.get("chatgptLoginDetails") if isinstance(seed_payload.get("chatgptLoginDetails"), dict) else {}
+    )
+    authenticated_session = chatgpt_login_details.get("authenticatedSession")
+    if (
+        bool(chatgpt_login.get("ok"))
+        and str(chatgpt_login.get("status") or "").strip().lower() == "completed"
+        and isinstance(authenticated_session, dict)
+    ):
+        normalized["authenticated_session"] = dict(authenticated_session)
+        normalized["chatgpt_workspace_id"] = str(chatgpt_login.get("personalWorkspaceId") or "").strip()
+    return normalized
+
+
+def _run_protocol_oauth_with_proxy(
+    *,
+    auth_obj: dict[str, Any],
+    resolved_proxy: str | None,
+    force_email_otp_resend_on_verification: bool,
+) -> ProtocolRegistrationResult:
+    authenticated_session = auth_obj.get("authenticated_session")
+    if not isinstance(authenticated_session, dict):
+        return run_protocol_repair_once(
+            auth_obj=auth_obj,
+            proxy=resolved_proxy,
+            force_email_otp_resend_on_verification=force_email_otp_resend_on_verification,
+        )
+
+    # Fail closed: a fresh password retry here can deactivate an account that just logged in successfully.
+    session = restore_authenticated_session_from_context(
+        authenticated_session,
+        explicit_proxy=resolved_proxy,
+    )
+    try:
+        return handoff_authenticated_chatgpt_session_to_codex(
+            session=session,
+            explicit_proxy=resolved_proxy,
+            email=str(auth_obj.get("email") or "").strip(),
+            mailbox_ref=str(auth_obj.get("mailbox_ref") or "").strip(),
+            first_name=str(auth_obj.get("first_name") or "").strip(),
+            last_name=str(auth_obj.get("last_name") or "").strip(),
+            birthdate=str(auth_obj.get("birthdate") or "").strip(),
+            preferred_workspace_id=str(auth_obj.get("chatgpt_workspace_id") or "").strip(),
+        )
+    finally:
+        try:
+            session.close()
+        except Exception:
+            pass
 
 
 DEFAULT_REUSE_SEED_MAILBOX_MAX_AGE_SECONDS = 0
@@ -359,16 +415,16 @@ def run_protocol_oauth_once(
                         probe_expected_statuses={200, 307, 308},
                     ) as flow_proxy:
                         resolved_proxy = str(flow_proxy.proxy_url or "").strip() or None
-                        protocol_result = run_protocol_repair_once(
+                        protocol_result = _run_protocol_oauth_with_proxy(
                             auth_obj=auth_obj,
-                            proxy=resolved_proxy,
+                            resolved_proxy=resolved_proxy,
                             force_email_otp_resend_on_verification=force_email_otp_resend_on_verification,
                         )
                         result_auth = dict(protocol_result.auth or {})
                 else:
-                    protocol_result = run_protocol_repair_once(
+                    protocol_result = _run_protocol_oauth_with_proxy(
                         auth_obj=auth_obj,
-                        proxy=explicit_proxy,
+                        resolved_proxy=explicit_proxy,
                         force_email_otp_resend_on_verification=force_email_otp_resend_on_verification,
                     )
                     result_auth = dict(protocol_result.auth or {})
@@ -453,13 +509,37 @@ def run_protocol_oauth_from_path(
     workspace_selector: str | None = None,
     force_email_otp_resend_on_verification: bool = False,
 ) -> ProtocolOAuthResult:
-    return run_protocol_oauth_once(
-        seed_payload=load_json_payload(seed_path),
-        output_dir=output_dir,
-        explicit_proxy=explicit_proxy,
-        workspace_selector=workspace_selector,
-        force_email_otp_resend_on_verification=force_email_otp_resend_on_verification,
-    )
+    resolved_seed_path = Path(seed_path)
+    seed_payload = load_json_payload(resolved_seed_path)
+    try:
+        return run_protocol_oauth_once(
+            seed_payload=seed_payload,
+            output_dir=output_dir,
+            explicit_proxy=explicit_proxy,
+            workspace_selector=workspace_selector,
+            force_email_otp_resend_on_verification=force_email_otp_resend_on_verification,
+        )
+    finally:
+        _clear_consumed_authenticated_session(resolved_seed_path)
+
+
+def _clear_consumed_authenticated_session(seed_path: Path) -> None:
+    try:
+        payload = load_json_payload(seed_path)
+        details = payload.get("chatgptLoginDetails")
+        if not isinstance(details, dict) or "authenticatedSession" not in details:
+            return
+        updated_details = dict(details)
+        updated_details.pop("authenticatedSession", None)
+        updated_payload = dict(payload)
+        updated_payload["chatgptLoginDetails"] = updated_details
+        temporary_path = seed_path.with_name(f".{seed_path.name}.{os.getpid()}.tmp")
+        temporary_path.write_text(json.dumps(updated_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(temporary_path, 0o600)
+        os.replace(temporary_path, seed_path)
+    except Exception as exc:
+        print(f"[protocol_oauth] authenticated session cleanup failed type={type(exc).__name__}")
 
 
 def _parse_args() -> argparse.Namespace:

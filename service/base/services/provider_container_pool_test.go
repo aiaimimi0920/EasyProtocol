@@ -177,7 +177,14 @@ func TestProviderContainerPoolSpawnAdoptsConflictingManagedChild(t *testing.T) {
 					Labels map[string]string `json:"Labels"`
 				}{
 					Image: "ghcr.io/test/easy-protocol-python:new",
-					Env:   []string{"EASY_PROTOCOL_CHILD_SERVICE_NAME=PythonProtocol-001"},
+					Env: []string{
+						"EASY_PROTOCOL_CHILD_SERVICE_NAME=PythonProtocol-001",
+						"HOME=/tmp/easy-home",
+						"PYTHONDONTWRITEBYTECODE=1",
+						"XDG_CACHE_HOME=/tmp/easy-cache",
+						"XDG_CONFIG_HOME=/tmp/easy-config",
+						"XDG_RUNTIME_DIR=/tmp/easy-runtime",
+					},
 					Labels: map[string]string{
 						"easyprotocol.managed_child": "true",
 					},
@@ -220,18 +227,81 @@ func TestProviderContainerPoolSpawnAdoptsConflictingManagedChild(t *testing.T) {
 	}
 }
 
+func TestProviderContainerPoolSpawnAppliesDiskGrowthGuards(t *testing.T) {
+	originalHealthWaiter := providerChildHealthWaiter
+	originalCapabilitiesFetcher := providerChildCapabilitiesFetcher
+	t.Cleanup(func() {
+		providerChildHealthWaiter = originalHealthWaiter
+		providerChildCapabilitiesFetcher = originalCapabilitiesFetcher
+	})
+	providerChildHealthWaiter = func(_ context.Context, _ *http.Client, _ string) error {
+		return nil
+	}
+	providerChildCapabilitiesFetcher = func(_ context.Context, _ *http.Client, _ string) ([]string, error) {
+		return []string{"codex.semantic.step"}, nil
+	}
+
+	docker := &fakeProviderContainerDocker{}
+	family := &providerContainerFamily{
+		providerID:          "python",
+		language:            "python",
+		servicePrefix:       "PythonProtocol",
+		containerNamePrefix: "easy-protocol-python",
+		endpointHostPrefix:  "easy-protocol-python",
+		image:               "ghcr.io/test/easy-protocol-python:new",
+		networkName:         "EasyAiMi",
+		composeProject:      "easy-protocol",
+		port:                9100,
+		supportedOps:        []string{"codex.semantic.step"},
+		maxReplicas:         1,
+		nextReplicaIndex:    1,
+		children:            map[string]*providerContainerChild{},
+	}
+	pool := &providerContainerPool{
+		registry:   registry.New(),
+		docker:     docker,
+		httpClient: &http.Client{},
+	}
+
+	if _, err := pool.spawnChild(context.Background(), family); err != nil {
+		t.Fatalf("spawn child: %v", err)
+	}
+	if len(docker.created) != 1 {
+		t.Fatalf("expected one create request, got %d", len(docker.created))
+	}
+	request := docker.created[0]
+	if request.HostConfig.LogConfig.Type != "json-file" {
+		t.Fatalf("unexpected log driver: %q", request.HostConfig.LogConfig.Type)
+	}
+	if request.HostConfig.LogConfig.Config["max-size"] != "20m" || request.HostConfig.LogConfig.Config["max-file"] != "5" {
+		t.Fatalf("unexpected log rotation: %#v", request.HostConfig.LogConfig.Config)
+	}
+	if request.HostConfig.Tmpfs["/tmp"] == "" {
+		t.Fatal("expected /tmp tmpfs for managed provider child")
+	}
+	if !dockerContainerEnvMatches(request.Env, []string{
+		"PYTHONDONTWRITEBYTECODE=1",
+		"HOME=/tmp/easy-home",
+		"XDG_CACHE_HOME=/tmp/easy-cache",
+	}) {
+		t.Fatalf("missing ephemeral-cache environment: %#v", request.Env)
+	}
+}
+
 type fakeProviderContainerDocker struct {
 	inspects  map[string]dockerContainerInspect
 	removed   []string
+	created   []dockerContainerCreateRequest
 	createErr error
 	started   int
 }
 
-func (f *fakeProviderContainerDocker) CreateContainer(_ context.Context, _ string, _ dockerContainerCreateRequest) (string, error) {
+func (f *fakeProviderContainerDocker) CreateContainer(_ context.Context, _ string, request dockerContainerCreateRequest) (string, error) {
 	if f.createErr != nil {
 		return "", f.createErr
 	}
-	return "", nil
+	f.created = append(f.created, request)
+	return "created-container", nil
 }
 
 func (f *fakeProviderContainerDocker) StartContainer(_ context.Context, _ string) error {
